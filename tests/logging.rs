@@ -6,6 +6,7 @@ use cauto::routing::{
     TaskType,
 };
 use cauto::state::decision_log::{DecisionRecord, append_json_line, latest_route, timestamp_now};
+use cauto::state::{FeedbackKind, append_feedback};
 use cauto::state::{build_report, prompt_sha256, sanitize_argv};
 use proptest::prelude::*;
 use tempfile::tempdir;
@@ -15,6 +16,7 @@ fn record(index: usize) -> DecisionRecord {
     DecisionRecord {
         schema_version: 1,
         record_type: "decision".into(),
+        decision_mode: "launched".into(),
         decision_id: format!("id-{index}"),
         timestamp: timestamp_now(),
         cauto_version: "test".into(),
@@ -35,6 +37,7 @@ fn record(index: usize) -> DecisionRecord {
             parallelizability: one,
         },
         complexity_score: 25,
+        calibration: None,
         confidence_basis_points: 8_000,
         matched_rule_ids: vec!["raise".into()],
         raising_rule_ids: vec!["raise".into()],
@@ -125,6 +128,15 @@ fn report_summarizes_routes_and_rules() {
     assert_eq!(report.classifier_invocation_rate_basis_points, 5_000);
     assert_eq!(report.rules_most_often_raising_effort[0].0, "raise");
     assert_eq!(report.feedback_by_route["terra:medium"]["right"], 1);
+    assert_eq!(
+        report.feedback_by_repository[0].repository_identifier,
+        "repo"
+    );
+    assert_eq!(report.feedback_by_repository[0].feedback.right, 1);
+    assert_eq!(
+        report.feedback_by_repository[0].status,
+        "insufficient-feedback"
+    );
 }
 
 #[test]
@@ -156,6 +168,42 @@ fn latest_effort_is_bounded_to_the_requested_repository() {
         Some((ModelFamily::Terra, ReasoningLevel::Max))
     );
     assert_eq!(latest_route(&path, "missing").unwrap(), None);
+}
+
+#[test]
+fn preview_decisions_do_not_affect_hysteresis() {
+    let root = tempdir().unwrap();
+    let path = root.path().join("decisions.jsonl");
+    let mut preview = record(1);
+    preview.decision_mode = "preview".into();
+    preview.selected_effort = ReasoningLevel::Max;
+    append_json_line(&path, &serde_json::to_vec(&preview).unwrap()).unwrap();
+    let mut launched = record(2);
+    launched.selected_effort = ReasoningLevel::Medium;
+    append_json_line(&path, &serde_json::to_vec(&launched).unwrap()).unwrap();
+
+    assert_eq!(
+        latest_route(&path, "repo").unwrap(),
+        Some((ModelFamily::Terra, ReasoningLevel::Medium))
+    );
+}
+
+#[test]
+fn feedback_ignores_preview_decisions() {
+    let root = tempdir().unwrap();
+    let path = root.path().join("decisions.jsonl");
+    let mut launched = record(1);
+    launched.decision_id = "launched".into();
+    append_json_line(&path, &serde_json::to_vec(&launched).unwrap()).unwrap();
+    let mut preview = record(2);
+    preview.decision_id = "preview".into();
+    preview.decision_mode = "preview".into();
+    append_json_line(&path, &serde_json::to_vec(&preview).unwrap()).unwrap();
+
+    assert_eq!(
+        append_feedback(&path, "repo", FeedbackKind::Underpowered).unwrap(),
+        "launched"
+    );
 }
 
 proptest! {

@@ -24,6 +24,16 @@ pub fn render(
         output.push_str(&why.join(", "));
         output.push('\n');
     }
+    if let Some(calibration) = &decision.calibration {
+        output.push_str(&format!(
+            "Calibration: configured {:+}, applied {:+}; score {} -> {} ({})\n",
+            calibration.configured_offset,
+            calibration.applied_offset,
+            calibration.base_score,
+            calibration.calibrated_score,
+            calibration.reason,
+        ));
+    }
     if decision.ultra_selected {
         output.push_str("Ultra: selected with explicit delegation authorization\n");
     } else if decision.ultra_candidate {

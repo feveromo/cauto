@@ -427,6 +427,56 @@ pub enum TaskType {
     Review,
 }
 
+/// Repository-local score calibration, bounded to a conservative range.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct ScoreCalibration(i8);
+
+impl ScoreCalibration {
+    /// Largest positive or negative repository calibration.
+    pub const MAX_ABS: i8 = 10;
+
+    /// Validates a persisted or proposed calibration value.
+    pub fn new(points: i8) -> Result<Self, String> {
+        if (-Self::MAX_ABS..=Self::MAX_ABS).contains(&points) {
+            Ok(Self(points))
+        } else {
+            Err(format!(
+                "calibration {points} is outside -{}..={}",
+                Self::MAX_ABS,
+                Self::MAX_ABS
+            ))
+        }
+    }
+
+    /// Returns the signed score-point offset.
+    #[must_use]
+    pub const fn points(self) -> i8 {
+        self.0
+    }
+
+    /// Returns whether the calibration has no routing effect.
+    #[must_use]
+    pub const fn is_zero(self) -> bool {
+        self.0 == 0
+    }
+}
+
+/// Separate explanation of how repository calibration affected selection.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CalibrationEffect {
+    /// Persisted bounded offset considered by the router.
+    pub configured_offset: i8,
+    /// Offset actually applied after task and Max guards.
+    pub applied_offset: i8,
+    /// Deterministic score before repository calibration.
+    pub base_score: u8,
+    /// Score passed into family, effort, and hysteresis selection.
+    pub calibrated_score: u8,
+    /// Exact explanation for applying or suppressing the offset.
+    pub reason: String,
+}
+
 /// Configuration layer from which a rule originated.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -498,6 +548,8 @@ pub struct RouteDecision {
     pub dimensions: DimensionScores,
     /// Weighted complexity normalized to 0..=100.
     pub normalized_score: u8,
+    /// Repository calibration considered during selection, when configured.
+    pub calibration: Option<CalibrationEffect>,
     /// Confidence in the evidence, independent of model strength.
     pub confidence: Confidence,
     /// Structured project and user rule matches.

@@ -3,14 +3,17 @@ use std::path::{Path, PathBuf};
 use std::process::{ExitCode, Stdio};
 use std::time::Instant;
 
-use crate::cli::{FeedbackArg, GlobalArgs, ModelsArgs};
+use crate::cli::{FeedbackArg, GlobalArgs, ModelsArgs, TuneArgs};
 use crate::codex::args::ExplicitNativeOverrides;
 use crate::error::AppError;
 use crate::paths::CautoPaths;
 use crate::routing::{
     EvidenceQuality, ModelFamily, SelectionConstraints, TaskType, extract_features, route,
 };
-use crate::state::{FeedbackKind, append_feedback, build_report, repository_identifier};
+use crate::state::{
+    FeedbackKind, analyze_repository, append_feedback, build_report_with_calibrations, load_store,
+    repository_identifier, reset_repository, save_recommendation,
+};
 
 use super::{catalog_for, load_context_and_config, resolve_installation};
 
@@ -220,7 +223,8 @@ pub(super) fn run_feedback(
 }
 
 pub(super) fn run_report(global: &GlobalArgs) -> Result<ExitCode, AppError> {
-    let report = build_report(&CautoPaths::discover()?.decisions())?;
+    let paths = CautoPaths::discover()?;
+    let report = build_report_with_calibrations(&paths.decisions(), &paths.calibration())?;
     if global.json {
         println!(
             "{}",
@@ -246,6 +250,20 @@ pub(super) fn run_report(global: &GlobalArgs) -> Result<ExitCode, AppError> {
         println!("Routes: {:?}", report.route_distribution);
         println!("Feedback: {:?}", report.feedback_distribution);
         println!("Feedback by route: {:?}", report.feedback_by_route);
+        println!("Feedback by repository:");
+        for repository in &report.feedback_by_repository {
+            println!(
+                "  {} [{}]: eligible={}, tuning={}, calibration={}, previews excluded={}",
+                repository.repository_name,
+                repository.repository_identifier,
+                repository.eligible_feedback_count,
+                repository.status,
+                repository
+                    .current_calibration
+                    .map_or_else(|| "none".into(), |offset| format!("{offset:+}")),
+                repository.previews_excluded,
+            );
+        }
         println!(
             "Rules raising effort: {:?}",
             report.rules_most_often_raising_effort
@@ -254,6 +272,117 @@ pub(super) fn run_report(global: &GlobalArgs) -> Result<ExitCode, AppError> {
             "Rules lowering effort: {:?}",
             report.rules_most_often_lowering_effort
         );
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+pub(super) fn run_tune(global: &GlobalArgs, args: TuneArgs) -> Result<ExitCode, AppError> {
+    let current = std::env::current_dir().map_err(|source| AppError::Io {
+        path: PathBuf::from("."),
+        source,
+    })?;
+    let repository = crate::context::repository::discover(global.repo.as_deref(), &current)?;
+    let paths = CautoPaths::discover()?;
+    let repository_id = repository_identifier(&repository.root);
+    let mut store = load_store(&paths.calibration())?;
+
+    if args.reset {
+        let removed = reset_repository(&paths.calibration(), &mut store, &repository_id)?;
+        if global.json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "schema_version": 1,
+                    "repository_identifier": repository_id,
+                    "reset": removed.is_some(),
+                    "removed_calibration": removed,
+                }))
+                .map_err(|error| AppError::Serialization(error.to_string()))?
+            );
+        } else if !global.quiet {
+            match removed {
+                Some(offset) => println!(
+                    "Reset calibration for {} [{}]: {offset:+} -> none",
+                    repository.name, repository_id
+                ),
+                None => println!(
+                    "No calibration was applied for {} [{}]; nothing changed",
+                    repository.name, repository_id
+                ),
+            }
+        }
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    let analysis = analyze_repository(
+        &paths.decisions(),
+        &store,
+        Some((&repository_id, &repository.name)),
+    )?;
+    let tuning = analysis
+        .repositories
+        .first()
+        .expect("repository filter always produces one analysis");
+    let changed = if args.apply {
+        save_recommendation(&paths.calibration(), &mut store, tuning)?
+    } else {
+        None
+    };
+    if global.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "schema_version": 1,
+                "read_only": !args.apply,
+                "analysis": analysis,
+                "change": changed.map(|(before, after)| serde_json::json!({
+                    "repository_identifier": repository_id,
+                    "before": before,
+                    "after": after,
+                })),
+            }))
+            .map_err(|error| AppError::Serialization(error.to_string()))?
+        );
+    } else if !global.quiet {
+        println!("Repository: {} [{}]", tuning.repository_name, repository_id);
+        println!(
+            "Eligible feedback: {} (right={}, underpowered={}, overkill={}; diagnostic failures={})",
+            tuning.eligible_feedback_count,
+            tuning.feedback.right,
+            tuning.feedback.underpowered,
+            tuning.feedback.overkill,
+            tuning.feedback.failed_for_other_reason,
+        );
+        println!("Preview feedback excluded: {}", tuning.previews_excluded);
+        println!(
+            "Current calibration: {}",
+            tuning
+                .current_calibration
+                .map_or_else(|| "none".into(), |offset| format!("{offset:+} points"))
+        );
+        println!(
+            "Recommendation: {}",
+            tuning
+                .proposed_calibration
+                .map_or_else(|| "none".into(), |offset| format!("{offset:+} points"))
+        );
+        println!("Status: {}", tuning.status);
+        println!("Reason: {}", tuning.reason);
+        if !args.apply {
+            println!(
+                "Read-only analysis; run `cauto tune --apply` to approve this repository's recommendation"
+            );
+        } else {
+            match changed {
+                Some((before, after)) => println!(
+                    "Changed calibration for {} [{}]: {} -> {after:+} points",
+                    tuning.repository_name,
+                    repository_id,
+                    before.map_or_else(|| "none".into(), |value| format!("{value:+} points")),
+                ),
+                None => println!("No calibration change was applied"),
+            }
+        }
     }
     Ok(ExitCode::SUCCESS)
 }

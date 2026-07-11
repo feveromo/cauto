@@ -119,6 +119,16 @@ pub(super) fn run_route(
     let mut constraints = applied.constraints;
     constraints.hysteresis_points = loaded.config.hysteresis_points;
     let repository_id = crate::state::repository_identifier(&context.repository.root);
+    match crate::state::load_calibration(&paths.calibration(), &repository_id) {
+        Ok(Some(calibration)) => constraints.calibration = calibration,
+        Ok(None) => {}
+        Err(error) => {
+            // Calibration is optional state and must never block baseline routing.
+            if global.verbose {
+                eprintln!("cauto: calibration unavailable; using baseline routing: {error}");
+            }
+        }
+    }
     match crate::state::decision_log::latest_route(&paths.decisions(), &repository_id) {
         Ok(Some((family, effort))) => {
             constraints.prior_family = Some(family);
@@ -383,6 +393,7 @@ pub(super) fn run_route(
         policy,
         classifier_ran,
         classifier_outcome: &classifier_outcome,
+        preview: args.dry_run || explain,
         strict: loaded.config.strict_logging,
         quiet: global.quiet,
     })?;

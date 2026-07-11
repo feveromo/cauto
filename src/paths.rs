@@ -48,4 +48,9 @@ impl CautoPaths {
     pub fn decisions(&self) -> PathBuf {
         self.state_dir.join("decisions.jsonl")
     }
+
+    #[must_use]
+    pub fn calibration(&self) -> PathBuf {
+        self.state_dir.join("calibration.json")
+    }
 }

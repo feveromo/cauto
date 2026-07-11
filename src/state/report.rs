@@ -7,6 +7,7 @@ use serde::Serialize;
 use crate::error::AppError;
 
 use super::decision_log::DecisionRecord;
+use super::tuning::{CalibrationStore, RepositoryTuning, analyze_repository, load_store};
 
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct HistoryReport {
@@ -22,6 +23,7 @@ pub struct HistoryReport {
     pub downgrade_rate_basis_points: u16,
     pub feedback_distribution: BTreeMap<String, u64>,
     pub feedback_by_route: BTreeMap<String, BTreeMap<String, u64>>,
+    pub feedback_by_repository: Vec<RepositoryTuning>,
     pub rules_most_often_raising_effort: Vec<(String, u64)>,
     pub rules_most_often_lowering_effort: Vec<(String, u64)>,
 }
@@ -45,13 +47,27 @@ fn top_rules(map: BTreeMap<String, u64>) -> Vec<(String, u64)> {
 }
 
 pub fn build_report(path: &Path) -> Result<HistoryReport, AppError> {
+    build_report_inner(path, CalibrationStore::default())
+}
+
+pub fn build_report_with_calibrations(
+    path: &Path,
+    calibration_path: &Path,
+) -> Result<HistoryReport, AppError> {
+    let store = load_store(calibration_path).unwrap_or_default();
+    build_report_inner(path, store)
+}
+
+fn build_report_inner(path: &Path, store: CalibrationStore) -> Result<HistoryReport, AppError> {
     let file = match std::fs::File::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(HistoryReport {
+            let mut report = HistoryReport {
                 schema_version: 1,
                 ..HistoryReport::default()
-            });
+            };
+            report.feedback_by_repository = analyze_repository(path, &store, None)?.repositories;
+            return Ok(report);
         }
         Err(source) => {
             return Err(AppError::Io {
@@ -146,5 +162,6 @@ pub fn build_report(path: &Path) -> Result<HistoryReport, AppError> {
     report.downgrade_rate_basis_points = rate(downgrades, report.total_decisions);
     report.rules_most_often_raising_effort = top_rules(raising);
     report.rules_most_often_lowering_effort = top_rules(lowering);
+    report.feedback_by_repository = analyze_repository(path, &store, None)?.repositories;
     Ok(report)
 }

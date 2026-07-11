@@ -24,6 +24,7 @@ pub(super) struct DecisionLogInput<'a> {
     pub policy: InjectionPolicy,
     pub classifier_ran: bool,
     pub classifier_outcome: &'a str,
+    pub preview: bool,
     pub strict: bool,
     pub quiet: bool,
 }
@@ -87,6 +88,7 @@ pub(super) fn write(input: DecisionLogInput<'_>) -> Result<(), AppError> {
     let record = DecisionRecord {
         schema_version: 1,
         record_type: "decision".into(),
+        decision_mode: if input.preview { "preview" } else { "launched" }.into(),
         decision_id,
         timestamp,
         cauto_version: env!("CARGO_PKG_VERSION").into(),
@@ -99,6 +101,7 @@ pub(super) fn write(input: DecisionLogInput<'_>) -> Result<(), AppError> {
         task_type: input.decision.task_type.clone(),
         dimensions: input.decision.dimensions,
         complexity_score: input.decision.normalized_score,
+        calibration: input.decision.calibration.clone(),
         confidence_basis_points: input.decision.confidence.basis_points(),
         matched_rule_ids: input
             .decision

@@ -112,7 +112,8 @@ weights remain user- or CLI-owned. Example user configuration:
 
 ```toml
 version = 1
-classifier = "auto"
+# Optional extra native Codex task; opt in per task with --classifier auto/always.
+classifier = "never"
 classifier_confidence_threshold = 0.72
 default_model = "gpt-5.6-sol"
 default_effort = "medium"
@@ -156,7 +157,8 @@ overrides, catalog support, and downgrade rules are then applied.
 
 Threshold hysteresis reads at most the last 256 KiB of redacted decision
 history and retains the previous repository effort only inside the configured
-boundary margin. It never reads a prior raw prompt because none is stored.
+boundary margin. Preview decisions never affect hysteresis. It never reads a
+prior raw prompt because none is stored.
 
 `cauto models` shows the installed catalog. Add `--refresh`, `--bundled`,
 `--include-hidden`, or `--json`. `cauto doctor` reports the resolved binary,
@@ -165,10 +167,10 @@ actual Max/Ultra support without printing secrets.
 
 ## Classifier
 
-The deterministic route runs first. Luna classification is considered only for
-low-confidence, conflicting, or unmatched tasks, or with
-`--classifier always`. Disable it with `--no-classifier`, `--classifier never`,
-or `--offline`.
+The deterministic route runs first. The optional Luna classifier is disabled by
+default because it launches an extra native Codex task. Opt in for uncertain
+tasks with `--classifier auto`, or force it with `--classifier always`.
+`--no-classifier`, `--classifier never`, and `--offline` disable it.
 
 `--dry-run` and `explain` report when the classifier would run but do not start
 it. Pass `--run-classifier` with a preview only when that extra native Codex
@@ -196,7 +198,40 @@ cauto feedback failed-for-other-reason
 cauto report
 ```
 
-Feedback is reported but does not automatically retune version 1.
+Feedback never changes routing in the background; only `cauto tune --apply`
+can persist a calibration.
+
+## Feedback-Driven Tuning
+
+Tuning is repository-specific, bounded, and always opt-in. The normal workflow
+is:
+
+1. Work normally and let real sessions produce launched decisions.
+2. Submit `right`, `underpowered`, `overkill`, or diagnostic
+   `failed-for-other-reason` feedback after those sessions.
+3. Inspect the read-only recommendation with `cauto tune` (or `--json`).
+4. Run `cauto tune --apply` only when its explanation looks right.
+
+A repository needs at least three non-preview routing feedback events, and at
+least 70% must point to `underpowered` or `overkill`. `right` counts against a
+change; `failed-for-other-reason` is displayed but cannot affect routing.
+Eligible feedback proposes only a +5 or -5 score-point calibration. Preview
+decisions and feedback attached to previews are excluded.
+
+Applied values live separately from config and policy in
+`~/.local/state/cauto/calibration.json`. The versioned file contains repository
+identifiers and aggregate counts, never prompts. Writes are atomic and private.
+Use `cauto tune --reset` to remove only the current (or `--repo PATH` selected)
+repository's calibration.
+
+Calibration is applied after deterministic feature and rule scoring and before
+family/effort selection and hysteresis. Route output shows the configured and
+effective offset separately from ordinary reasons. It cannot override explicit
+model/family/effort choices, native overrides, project safety floors, catalog
+checks, or Ultra authorization; it cannot escalate documentation/mechanical
+work, manufacture Ultra eligibility, or force Max. Missing or malformed state
+falls back to unchanged baseline routing. `cauto report` shows per-repository
+eligibility, recommendations, applied calibration, and excluded previews.
 
 ## Troubleshooting
 

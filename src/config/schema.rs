@@ -170,7 +170,9 @@ pub struct ValidatedConfig {
 impl Default for ValidatedConfig {
     fn default() -> Self {
         Self {
-            classifier: ClassifierMode::Auto,
+            // A classifier is an additional native Codex task. Keep routing deterministic
+            // until a user explicitly opts into that extra quota and latency.
+            classifier: ClassifierMode::Never,
             classifier_confidence_threshold_basis_points: 7_200,
             default_model: "gpt-5.6-sol".into(),
             default_effort: ReasoningLevel::Medium,

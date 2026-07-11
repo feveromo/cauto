@@ -145,6 +145,8 @@ reason = "requires the cheapest family"
         repository.to_str().unwrap(),
         "--codex-bin",
         codex.to_str().unwrap(),
+        "--classifier",
+        "auto",
         "--dry-run",
         "--json",
         "policy floor and cost ceiling",

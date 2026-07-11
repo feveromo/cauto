@@ -105,6 +105,8 @@ pub enum Commands {
     },
     /// Summarize redacted decision history.
     Report,
+    /// Analyze feedback and manage repository-local routing calibration.
+    Tune(TuneArgs),
     /// Generate shell completions.
     Completions {
         #[arg(value_enum)]
@@ -133,6 +135,16 @@ pub enum Commands {
         #[arg(long, default_value_t = 1_000)]
         iterations: u64,
     },
+}
+
+#[derive(Clone, Copy, Debug, Default, Args)]
+pub struct TuneArgs {
+    /// Apply the eligible recommendation for the selected repository.
+    #[arg(long, conflicts_with = "reset")]
+    pub apply: bool,
+    /// Remove only the selected repository's applied calibration.
+    #[arg(long, conflicts_with = "apply")]
+    pub reset: bool,
 }
 
 #[derive(Clone, Debug, Default, Args)]

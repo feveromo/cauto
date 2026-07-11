@@ -11,6 +11,7 @@ prompt argv
   -> typed user/project config merge
   -> one normalized task buffer
   -> compiled phrase/path policy evidence
+  -> optional bounded repository calibration value
   -> pure fixed-point route
   -> optional isolated classifier blend
   -> fingerprinted installed-catalog resolution
@@ -41,12 +42,22 @@ most once.
 ## Pure Router
 
 `routing` owns validated `BoundedScore`, `Confidence`, dimensions, evidence,
-floors/ceilings, fixed integer weighting, confidence, hysteresis, family choice,
-effort choice, and Ultra eligibility. It has no filesystem or process I/O.
+floors/ceilings, fixed integer weighting, `ScoreCalibration`, confidence,
+hysteresis, family choice, effort choice, and Ultra eligibility. It has no
+filesystem or process I/O.
 Risk dimensions are monotonic absent an explicit ceiling. Parallelizability
 does not raise normal complexity. Application orchestration supplies the latest
 same-repository effort from a bounded decision-log tail so the pure selector's
 threshold hysteresis is effective without an unbounded history read.
+
+Application orchestration also loads an optional repository-hash calibration
+and passes the validated -10 through +10 typed value into selection. The router
+applies it after deterministic scoring and before hysteresis, and returns a
+separate `CalibrationEffect`. Upward offsets are suppressed for documentation
+and mechanical work and capped below the Max threshold; Ultra eligibility uses
+the uncalibrated score. Explicit choices and policy constraints are applied at
+their normal higher-authority boundaries. Preview decisions are excluded from
+both prior-route lookup and tuning evidence.
 
 Classifier output is a 30% evidence blend after strict range and length checks.
 Deterministic policy remains 70%, and the same floors, ceilings, and Ultra gate
@@ -87,6 +98,22 @@ bounded prompt metadata. Unix assigns a process group so timeout terminates and
 reaps descendants. Temporary files are removed on every return path.
 Preview modes suppress this child by default and expose `--run-classifier` as
 an explicit quota-spending opt-in.
+
+## Feedback And Calibration State
+
+Decision and feedback JSONL remains append-only and redacted. Tuning analysis
+joins feedback to its decision ID, excludes preview-linked events, ignores
+diagnostic failures for eligibility, requires three routing outcomes, and
+requires a 70% directional signal. The recommendation is a conservative target
+offset of +5 or -5 points and is read-only until `cauto tune --apply`.
+
+Applied calibration uses a separate versioned
+`~/.local/state/cauto/calibration.json` store keyed only by repository hash.
+Entries contain the bounded offset, direction, aggregate counts, and timestamp;
+they contain no prompts. Atomic same-directory replacement and user-only modes
+match cache/state durability rules. Parsing failure is non-fatal on the launch
+path and yields baseline routing. `cauto tune --reset` removes only the selected
+repository entry.
 
 ## Launch Boundary
 

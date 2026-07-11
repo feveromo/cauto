@@ -135,6 +135,17 @@ pub fn extract_features(prompt: &str) -> FeatureAssessment {
         ],
     );
     let review = normalized.contains("review") && !normalized.contains("reviewed");
+    let operational_audit = contains_any(
+        &normalized,
+        &[
+            "audit recent usage",
+            "session logs",
+            "decision history",
+            "routing properly",
+            "routing usefully",
+            "dogfood",
+        ],
+    );
 
     if normalized.len() > 1_200 {
         dimensions.scope = dimensions.scope.saturating_add_signed(1);
@@ -178,6 +189,16 @@ pub fn extract_features(prompt: &str) -> FeatureAssessment {
             contribution: 10,
         });
     }
+    if operational_audit {
+        raise_to(&mut dimensions.scope, 3);
+        raise_to(&mut dimensions.ambiguity, 3);
+        raise_to(&mut dimensions.cost_of_being_wrong, 3);
+        raise_to(&mut dimensions.verification_burden, 4);
+        reasons.push(Reason {
+            label: "operational routing audit".into(),
+            contribution: 20,
+        });
+    }
     if contains_any(
         &normalized,
         &[
@@ -185,10 +206,14 @@ pub fn extract_features(prompt: &str) -> FeatureAssessment {
             "live-validate",
             "live validate",
             "session gate",
-            "restart",
-            "ui",
-            "browser",
-            "desktop",
+            "restart the client",
+            "restart codex",
+            "restart service",
+            "restart daemon",
+            "browser automation",
+            "live browser",
+            "desktop environment",
+            "desktop session",
             "runtime state",
         ],
     ) {
@@ -367,10 +392,39 @@ mod tests {
     #[test]
     fn live_reverse_engineering_raises_risk() {
         let assessment = extract_features(
-            "reverse engineer packet pathing, restart, and live-validate with repeated experiments",
+            "reverse engineer packet pathing, restart the client, and live-validate with repeated experiments",
         );
         assert_eq!(assessment.dimensions.ambiguity.get(), 4);
         assert!(assessment.dimensions.runtime_dependence.get() >= 3);
         assert!(assessment.dimensions.architectural_depth.get() >= 3);
+    }
+
+    #[test]
+    fn ordinary_ui_work_is_not_mistaken_for_live_runtime_control() {
+        let assessment = extract_features("improve the settings ui and add a focused test");
+        assert!(assessment.dimensions.runtime_dependence.get() <= 1);
+        assert!(assessment.dimensions.cost_of_being_wrong.get() <= 1);
+    }
+
+    #[test]
+    fn explicit_browser_automation_remains_live_runtime_work() {
+        let assessment = extract_features("fix browser automation and live validate the result");
+        assert!(assessment.dimensions.runtime_dependence.get() >= 3);
+    }
+
+    #[test]
+    fn operational_routing_audit_requires_sol_high() {
+        let assessment = extract_features(
+            "audit recent usage, inspect session logs and decision history, then verify routing properly",
+        );
+        assert!(assessment.dimensions.scope.get() >= 3);
+        assert!(assessment.dimensions.ambiguity.get() >= 3);
+        assert!(assessment.dimensions.verification_burden.get() >= 4);
+        assert!(
+            crate::routing::normalized_score(
+                assessment.dimensions,
+                crate::routing::Weights::default()
+            ) >= 46
+        );
     }
 }

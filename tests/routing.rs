@@ -3,7 +3,7 @@ use cauto::routing::select::effort_with_hysteresis;
 use cauto::routing::select::family_with_hysteresis;
 use cauto::routing::{
     BoundedScore, Conflict, DimensionScores, EvidenceQuality, ModelFamily, ReasoningLevel,
-    SelectionConstraints, TaskType, Weights, normalized_score, route,
+    ScoreCalibration, SelectionConstraints, TaskType, Weights, normalized_score, route,
 };
 use proptest::prelude::*;
 
@@ -186,4 +186,112 @@ fn rule_conflicts_survive_selection_and_reduce_confidence() {
             .any(|conflict| conflict.kind == "family-floor-ceiling")
     );
     assert!(decision.confidence < baseline.confidence);
+}
+
+#[test]
+fn calibration_is_bounded_and_composes_before_hysteresis() {
+    assert!(ScoreCalibration::new(11).is_err());
+    let decision = route(
+        TaskType::Coding,
+        dimensions([2, 2, 2, 1, 2, 2, 0]),
+        Weights::default(),
+        SelectionConstraints {
+            calibration: ScoreCalibration::new(-5).unwrap(),
+            prior_effort: Some(ReasoningLevel::High),
+            hysteresis_points: 2,
+            ..SelectionConstraints::default()
+        },
+        vec![],
+        vec![],
+        EvidenceQuality::default(),
+        vec![],
+        vec![],
+    );
+    let calibration = decision.calibration.unwrap();
+    assert_eq!(calibration.base_score, 46);
+    assert_eq!(calibration.calibrated_score, 41);
+    assert_eq!(decision.recommended_effort, ReasoningLevel::Medium);
+}
+
+#[test]
+fn upward_calibration_does_not_escalate_docs_or_mechanical_tasks() {
+    for task_type in [TaskType::Documentation, TaskType::Mechanical] {
+        let decision = route(
+            task_type,
+            dimensions([2, 2, 2, 1, 2, 2, 0]),
+            Weights::default(),
+            SelectionConstraints {
+                calibration: ScoreCalibration::new(10).unwrap(),
+                ..SelectionConstraints::default()
+            },
+            vec![],
+            vec![],
+            EvidenceQuality::default(),
+            vec![],
+            vec![],
+        );
+        let calibration = decision.calibration.unwrap();
+        assert_eq!(calibration.applied_offset, 0);
+        assert_eq!(calibration.base_score, calibration.calibrated_score);
+    }
+}
+
+#[test]
+fn calibration_cannot_force_max_or_override_explicit_choices_and_floors() {
+    let near_max = route(
+        TaskType::Coding,
+        dimensions([4, 3, 3, 3, 3, 3, 0]),
+        Weights::default(),
+        SelectionConstraints {
+            calibration: ScoreCalibration::new(10).unwrap(),
+            ..SelectionConstraints::default()
+        },
+        vec![],
+        vec![],
+        EvidenceQuality::default(),
+        vec![],
+        vec![],
+    );
+    assert_eq!(near_max.normalized_score, 84);
+    assert_eq!(near_max.recommended_effort, ReasoningLevel::ExtraHigh);
+
+    let floor_only = route(
+        TaskType::Coding,
+        DimensionScores::default(),
+        Weights::default(),
+        SelectionConstraints {
+            calibration: ScoreCalibration::new(-10).unwrap(),
+            family_floor: Some(ModelFamily::Sol),
+            effort_floor: Some(ReasoningLevel::High),
+            ..SelectionConstraints::default()
+        },
+        vec![],
+        vec![],
+        EvidenceQuality::default(),
+        vec![],
+        vec![],
+    );
+    assert_eq!(floor_only.recommended_family, ModelFamily::Sol);
+    assert_eq!(floor_only.recommended_effort, ReasoningLevel::High);
+
+    let constrained = route(
+        TaskType::Coding,
+        DimensionScores::default(),
+        Weights::default(),
+        SelectionConstraints {
+            calibration: ScoreCalibration::new(-10).unwrap(),
+            family_floor: Some(ModelFamily::Sol),
+            effort_floor: Some(ReasoningLevel::High),
+            explicit_family: Some(ModelFamily::Luna),
+            explicit_effort: Some(ReasoningLevel::Low),
+            ..SelectionConstraints::default()
+        },
+        vec![],
+        vec![],
+        EvidenceQuality::default(),
+        vec![],
+        vec![],
+    );
+    assert_eq!(constrained.recommended_family, ModelFamily::Luna);
+    assert_eq!(constrained.recommended_effort, ReasoningLevel::Low);
 }

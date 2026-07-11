@@ -43,6 +43,7 @@ pub fn run(cli: Cli) -> Result<ExitCode, AppError> {
         Some(Commands::Doctor) => commands::run_doctor(&cli.global),
         Some(Commands::Feedback { kind }) => commands::run_feedback(&cli.global, kind),
         Some(Commands::Report) => commands::run_report(&cli.global),
+        Some(Commands::Tune(args)) => commands::run_tune(&cli.global, args),
         Some(Commands::Completions { shell }) => {
             let mut command = Cli::command();
             clap_complete::generate(shell, &mut command, "cauto", &mut std::io::stdout());

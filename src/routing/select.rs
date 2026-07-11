@@ -1,6 +1,6 @@
 use super::{
-    Conflict, DimensionScores, ModelFamily, ReasoningLevel, RouteDecision, RuleMatch, TaskType,
-    Weights,
+    CalibrationEffect, Conflict, DimensionScores, ModelFamily, ReasoningLevel, RouteDecision,
+    RuleMatch, ScoreCalibration, TaskType, Weights,
     confidence::EvidenceQuality,
     confidence_for,
     score::{dimension_reasons, normalized_score},
@@ -31,6 +31,51 @@ pub struct SelectionConstraints {
     pub prior_family: Option<ModelFamily>,
     /// Most recent bounded route for this repository, when available.
     pub prior_effort: Option<ReasoningLevel>,
+    /// Bounded repository-local calibration applied before hysteresis.
+    pub calibration: ScoreCalibration,
+}
+
+fn calibrated_score(
+    task_type: &TaskType,
+    base_score: u8,
+    calibration: ScoreCalibration,
+) -> (u8, Option<CalibrationEffect>) {
+    if calibration.is_zero() {
+        return (base_score, None);
+    }
+    let configured = calibration.points();
+    let (score, reason) =
+        if configured > 0 && matches!(task_type, TaskType::Documentation | TaskType::Mechanical) {
+            (
+                base_score,
+                "upward calibration ignored for documentation or mechanical work".into(),
+            )
+        } else if configured > 0 && base_score >= 85 {
+            (
+                base_score,
+                "upward calibration ignored because the baseline already selects Max".into(),
+            )
+        } else if configured > 0 && base_score < 85 {
+            (
+                base_score.saturating_add(configured as u8).min(84),
+                "bounded repository calibration applied without allowing Max".into(),
+            )
+        } else {
+            (
+                base_score.saturating_add_signed(configured),
+                "bounded repository calibration applied".into(),
+            )
+        };
+    (
+        score,
+        Some(CalibrationEffect {
+            configured_offset: configured,
+            applied_offset: (i16::from(score) - i16::from(base_score)) as i8,
+            base_score,
+            calibrated_score: score,
+            reason,
+        }),
+    )
 }
 
 /// Selects the lowest family compatible with score and high-risk dimensions.
@@ -205,7 +250,8 @@ pub fn route(
     mut reasons: Vec<super::Reason>,
     escalation_signals: Vec<super::EscalationSignal>,
 ) -> RouteDecision {
-    let score = normalized_score(dimensions, weights);
+    let base_score = normalized_score(dimensions, weights);
+    let (score, calibration) = calibrated_score(&task_type, base_score, constraints.calibration);
     let mut family = apply_family_constraints(
         family_with_hysteresis(
             dimensions,
@@ -221,7 +267,8 @@ pub fn route(
         constraints.prior_effort,
         constraints.hysteresis_points,
     );
-    let ultra_candidate = score >= 69
+    // Calibration may never manufacture Ultra eligibility.
+    let ultra_candidate = base_score >= 69
         && dimensions.parallelizability.get() >= 3
         && constraints.meaningful_parallel_tracks;
     if ultra_candidate && constraints.explicit_effort.is_none() {
@@ -247,6 +294,7 @@ pub fn route(
         task_type,
         dimensions,
         normalized_score: score,
+        calibration,
         confidence: confidence_for(evidence),
         matched_rules,
         conflicts,

@@ -24,6 +24,9 @@ use std::os::unix::fs::OpenOptionsExt;
 pub struct DecisionRecord {
     pub schema_version: u32,
     pub record_type: String,
+    /// `preview` records are retained for observability but cannot bias a later launch.
+    #[serde(default = "default_decision_mode")]
+    pub decision_mode: String,
     pub decision_id: String,
     pub timestamp: String,
     pub cauto_version: String,
@@ -36,6 +39,8 @@ pub struct DecisionRecord {
     pub task_type: TaskType,
     pub dimensions: DimensionScores,
     pub complexity_score: u8,
+    #[serde(default)]
+    pub calibration: Option<crate::routing::CalibrationEffect>,
     pub confidence_basis_points: u16,
     pub matched_rule_ids: Vec<String>,
     pub raising_rule_ids: Vec<String>,
@@ -52,6 +57,10 @@ pub struct DecisionRecord {
     pub downgrade: Option<Downgrade>,
     pub sanitized_argv: Vec<String>,
     pub feedback: Option<String>,
+}
+
+fn default_decision_mode() -> String {
+    "launched".into()
 }
 
 #[cfg(unix)]
@@ -127,6 +136,10 @@ pub fn latest_route(
             continue;
         };
         if value.get("record_type").and_then(serde_json::Value::as_str) != Some("decision")
+            || value
+                .get("decision_mode")
+                .and_then(serde_json::Value::as_str)
+                == Some("preview")
             || value
                 .get("repository_identifier")
                 .and_then(serde_json::Value::as_str)

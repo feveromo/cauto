@@ -53,7 +53,9 @@ pub fn append_feedback(
         .rsplit(|byte| *byte == b'\n')
         .filter(|line| !line.is_empty())
         .filter_map(|line| serde_json::from_slice::<DecisionRecord>(line).ok())
-        .find(|record| record.repository_identifier == repository_id)
+        .find(|record| {
+            record.repository_identifier == repository_id && record.decision_mode != "preview"
+        })
         .ok_or_else(|| {
             AppError::InvalidArguments(
                 "no prior cauto decision exists for the current repository".into(),

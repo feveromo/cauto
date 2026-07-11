@@ -1,6 +1,6 @@
 use serde::Serialize;
 
-use crate::routing::{Downgrade, LaunchMode, RouteDecision, RoutePreset};
+use crate::routing::{CalibrationEffect, Downgrade, LaunchMode, RouteDecision, RoutePreset};
 
 #[derive(Serialize)]
 struct JsonDecision<'a> {
@@ -8,6 +8,7 @@ struct JsonDecision<'a> {
     family: &'a crate::routing::ModelFamily,
     effort: crate::routing::ReasoningLevel,
     score: u8,
+    calibration: Option<&'a CalibrationEffect>,
     confidence_basis_points: u16,
     ultra_candidate: bool,
     ultra_selected: bool,
@@ -55,6 +56,7 @@ pub fn render(
             family: &preset.model_family,
             effort: preset.display_level,
             score: decision.normalized_score,
+            calibration: decision.calibration.as_ref(),
             confidence_basis_points: decision.confidence.basis_points(),
             ultra_candidate: decision.ultra_candidate,
             ultra_selected: decision.ultra_selected,

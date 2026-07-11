@@ -3,9 +3,14 @@
 pub mod decision_log;
 pub mod feedback;
 pub mod report;
+pub mod tuning;
 
 pub use decision_log::{
     DecisionRecord, append_decision, prompt_sha256, repository_identifier, sanitize_argv,
 };
 pub use feedback::{FeedbackKind, append_feedback};
-pub use report::{HistoryReport, build_report};
+pub use report::{HistoryReport, build_report, build_report_with_calibrations};
+pub use tuning::{
+    AppliedCalibration, CalibrationStore, FeedbackCounts, RepositoryTuning, TuningAnalysis,
+    analyze_repository, load_calibration, load_store, reset_repository, save_recommendation,
+};
