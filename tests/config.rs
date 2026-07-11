@@ -4,7 +4,7 @@ use proptest::prelude::*;
 use tempfile::tempdir;
 
 #[test]
-fn project_overrides_user_but_cannot_force_fast() {
+fn project_overrides_user_rules_but_not_user_controls() {
     let root = tempdir().unwrap();
     let user = root.path().join("user.toml");
     let project = root.path().join("project.toml");
@@ -14,6 +14,19 @@ fn project_overrides_user_but_cannot_force_fast() {
 version = 1
 classifier = "never"
 fast_mode = "fast"
+default_model = "gpt-5.6-terra"
+default_effort = "low"
+ultra_requires_opt_in = true
+allow_automatic_downgrade = false
+strict_logging = true
+catalog_cache_hours = 24
+git_timeout_ms = 500
+catalog_timeout_ms = 3000
+classifier_timeout_seconds = 30
+hysteresis_points = 4
+
+[weights]
+scope = 42
 
 [[rules]]
 id = "same"
@@ -26,8 +39,6 @@ family_floor = "terra"
         &project,
         r#"
 version = 1
-classifier = "always"
-fast_mode = "no-fast"
 
 [[rules]]
 id = "same"
@@ -38,8 +49,19 @@ effort_floor = "high"
     )
     .unwrap();
     let loaded = load(&user, Some(&project)).unwrap();
-    assert_eq!(loaded.config.classifier, ClassifierMode::Always);
+    assert_eq!(loaded.config.classifier, ClassifierMode::Never);
     assert_eq!(loaded.config.fast_mode, FastMode::Fast);
+    assert_eq!(loaded.config.default_model, "gpt-5.6-terra");
+    assert_eq!(loaded.config.default_effort, ReasoningLevel::Low);
+    assert!(loaded.config.ultra_requires_opt_in);
+    assert!(!loaded.config.allow_automatic_downgrade);
+    assert!(loaded.config.strict_logging);
+    assert_eq!(loaded.config.catalog_cache_hours.get(), 24);
+    assert_eq!(loaded.config.git_timeout.get(), 500);
+    assert_eq!(loaded.config.catalog_timeout.get(), 3_000);
+    assert_eq!(loaded.config.classifier_timeout.get(), 30_000);
+    assert_eq!(loaded.config.hysteresis_points, 4);
+    assert_eq!(loaded.config.weights.scope, 42);
     assert_eq!(loaded.config.rules.len(), 1);
     assert_eq!(loaded.config.rules[0].phrases, ["project"]);
     assert_eq!(loaded.config.rules[0].family_floor, Some(ModelFamily::Sol));
@@ -47,6 +69,29 @@ effort_floor = "high"
         loaded.config.rules[0].effort_floor,
         Some(ReasoningLevel::High)
     );
+}
+
+#[test]
+fn project_policy_rejects_user_level_controls() {
+    let root = tempdir().unwrap();
+    let user = root.path().join("user.toml");
+    let project = root.path().join("project.toml");
+    std::fs::write(&user, "version = 1\nclassifier = \"never\"\n").unwrap();
+    std::fs::write(
+        &project,
+        r#"
+version = 1
+classifier = "always"
+ultra_requires_opt_in = false
+default_effort = "ultra"
+"#,
+    )
+    .unwrap();
+
+    let error = load(&user, Some(&project)).unwrap_err().to_string();
+    assert!(error.contains(project.to_str().unwrap()));
+    assert!(error.contains("unknown field"));
+    assert!(error.contains("classifier"));
 }
 
 #[test]

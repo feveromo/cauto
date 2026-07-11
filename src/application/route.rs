@@ -196,7 +196,7 @@ pub(super) fn run_route(
         unknown_catalog: catalog.source == CapabilitySource::Fallback,
         malformed_agents: context.agents.malformed_or_truncated,
         dirty_metadata: matches!(context.git.state, crate::context::GitState::Dirty),
-        conflict_count: applied.conflicts.len() as u16,
+        conflict_count: 0,
         rule_confidence_delta: applied.confidence_delta_basis_points,
     };
     let mut decision = route(
@@ -205,6 +205,7 @@ pub(super) fn run_route(
         loaded.config.weights,
         constraints.clone(),
         applied.matches.clone(),
+        applied.conflicts.clone(),
         evidence,
         reasons.clone(),
         features.escalation_signals.clone(),
@@ -213,7 +214,7 @@ pub(super) fn run_route(
     let mut classifier_outcome = "skipped".to_owned();
     let classifier_mode = effective_classifier(&args, &loaded);
     let luna = catalog.first_family(&ModelFamily::Luna);
-    if classifier::should_run(
+    let classifier_would_run = classifier::should_run(
         classifier_mode,
         decision.confidence,
         loaded.config.classifier_confidence_threshold_basis_points,
@@ -224,8 +225,10 @@ pub(super) fn run_route(
             && (args.effort.is_some() || native.effort_raw.is_some()),
         args.offline,
         luna.is_some(),
-    ) && let (Some(luna), Some(_)) = (luna, prompt.original.as_ref())
-    {
+    ) && prompt.original.is_some();
+    if classifier_would_run && (args.dry_run || explain) && !args.run_classifier {
+        classifier_outcome = "would-run".into();
+    } else if classifier_would_run && let (Some(luna), Some(_)) = (luna, prompt.original.as_ref()) {
         classifier_ran = true;
         let classifier_prompt =
             classifier::build_classifier_prompt(&prompt.analysis, &context, &decision)
@@ -251,6 +254,7 @@ pub(super) fn run_route(
                     loaded.config.weights,
                     constraints.clone(),
                     applied.matches.clone(),
+                    applied.conflicts.clone(),
                     evidence,
                     merged_reasons,
                     merged_signals,
@@ -338,6 +342,8 @@ pub(super) fn run_route(
                 plan.downgrade.as_ref(),
                 mode,
                 &context.repository.root.to_string_lossy(),
+                classifier_ran,
+                &classifier_outcome,
             )
             .map_err(|error| AppError::Serialization(error.to_string()))?
         );
@@ -356,6 +362,9 @@ pub(super) fn run_route(
         }
         if let Some(warning) = &catalog.warning {
             println!("Catalog: {warning}");
+        }
+        if classifier_outcome == "would-run" {
+            println!("Classifier: would run; pass --run-classifier to include it in this preview");
         }
     }
     if args.print_command {

@@ -200,12 +200,12 @@ pub fn route(
     weights: Weights,
     constraints: SelectionConstraints,
     matched_rules: Vec<RuleMatch>,
+    mut conflicts: Vec<Conflict>,
     mut evidence: EvidenceQuality,
     mut reasons: Vec<super::Reason>,
     escalation_signals: Vec<super::EscalationSignal>,
 ) -> RouteDecision {
     let score = normalized_score(dimensions, weights);
-    let mut conflicts = Vec::new();
     let mut family = apply_family_constraints(
         family_with_hysteresis(
             dimensions,
@@ -285,6 +285,7 @@ mod tests {
                 ..SelectionConstraints::default()
             },
             vec![],
+            vec![],
             EvidenceQuality::default(),
             vec![],
             vec![],
@@ -307,6 +308,7 @@ mod tests {
                 explicit_effort: Some(ReasoningLevel::Low),
                 ..SelectionConstraints::default()
             },
+            vec![],
             vec![],
             EvidenceQuality::default(),
             vec![],

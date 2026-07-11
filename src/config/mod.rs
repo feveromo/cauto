@@ -6,4 +6,4 @@ pub mod schema;
 pub mod validate;
 
 pub use load::{LoadedConfig, load};
-pub use schema::{RawConfig, RawRule, ValidatedConfig, ValidatedRule};
+pub use schema::{ProjectPolicy, RawConfig, RawRule, ValidatedConfig, ValidatedRule};

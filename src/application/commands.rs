@@ -271,6 +271,7 @@ pub(super) fn run_score_benchmark(iterations: u64) -> Result<ExitCode, AppError>
             crate::routing::Weights::default(),
             SelectionConstraints::default(),
             vec![],
+            vec![],
             EvidenceQuality::default(),
             vec![],
             vec![],
@@ -342,11 +343,12 @@ pub(super) fn run_core_benchmark(
         path: catalog_path.to_path_buf(),
         source,
     })?;
-    let raw: crate::config::RawConfig =
+    let policy: crate::config::ProjectPolicy =
         toml::from_str(&policy_text).map_err(|error| AppError::ConfigParse {
             path: policy_path.to_path_buf(),
             message: error.to_string(),
         })?;
+    let raw = crate::config::RawConfig::from(policy);
     let validated = crate::config::validate::into_validated(raw.clone(), policy_path)?;
     let compiled = crate::routing::CompiledRules::new(validated.rules.clone())?;
     let features = extract_features(
@@ -363,6 +365,7 @@ pub(super) fn run_core_benchmark(
         validated.weights,
         application.constraints,
         application.matches,
+        application.conflicts,
         EvidenceQuality::default(),
         vec![],
         vec![],
@@ -370,8 +373,8 @@ pub(super) fn run_core_benchmark(
     let parse_iterations = iterations.max(10);
     let config_ns = benchmark_loop(
         || {
-            let parsed: crate::config::RawConfig = toml::from_str(&policy_text).unwrap();
-            crate::config::RawConfig::default().merge(parsed)
+            let parsed: crate::config::ProjectPolicy = toml::from_str(&policy_text).unwrap();
+            crate::config::RawConfig::default().merge(parsed.into())
         },
         parse_iterations,
     );

@@ -67,6 +67,9 @@ pub struct RouteArgs {
     pub classifier: Option<String>,
     #[arg(long, conflicts_with = "classifier")]
     pub no_classifier: bool,
+    /// Allow a classifier task to run while previewing with --dry-run or explain.
+    #[arg(long, conflicts_with = "no_classifier")]
+    pub run_classifier: bool,
     #[arg(long)]
     pub offline: bool,
     #[arg(long)]

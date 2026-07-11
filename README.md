@@ -86,7 +86,9 @@ Configuration is loaded from:
 2. `<repo-root>/.cauto.toml`
 
 CLI and explicit native overrides are applied above those typed layers. Project
-policy cannot force Fast. Example user configuration:
+policy accepts only `version` and `rules`; classifier behavior, defaults, Fast,
+Ultra authorization, downgrade policy, logging, cache/timeouts, hysteresis, and
+weights remain user- or CLI-owned. Example user configuration:
 
 ```toml
 version = 1
@@ -147,6 +149,10 @@ The deterministic route runs first. Luna classification is considered only for
 low-confidence, conflicting, or unmatched tasks, or with
 `--classifier always`. Disable it with `--no-classifier`, `--classifier never`,
 or `--offline`.
+
+`--dry-run` and `explain` report when the classifier would run but do not start
+it. Pass `--run-classifier` with a preview only when that extra native Codex
+task is intentional.
 
 The classifier uses native `codex exec` and saved authentication in a private
 temporary directory, read-only sandbox, low effort, strict JSON schema, and a

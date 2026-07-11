@@ -454,6 +454,7 @@ impl CatalogManager<'_> {
         if !refresh
             && !bundled_only
             && let Some(catalog) = cached.clone()
+            && !catalog.stale
         {
             return Ok(catalog);
         }
@@ -462,7 +463,20 @@ impl CatalogManager<'_> {
             .map(|catalog| catalog.fetched_at_unix)
             .unwrap_or(0);
         let refresh_lock_path = path.with_extension("refresh.lock");
-        let Some(_refresh_lock) = acquire_refresh_lock(&refresh_lock_path, request.timeout)? else {
+        let refresh_lock = match acquire_refresh_lock(&refresh_lock_path, request.timeout) {
+            Ok(lock) => lock,
+            Err(error) => {
+                if let Some(mut catalog) = cached {
+                    catalog.stale = true;
+                    catalog.warning = Some(format!(
+                        "catalog refresh lock failed ({error}); using stale cache"
+                    ));
+                    return Ok(catalog);
+                }
+                return Err(error);
+            }
+        };
+        let Some(_refresh_lock) = refresh_lock else {
             if let Some(mut catalog) = cached {
                 catalog.stale = true;
                 catalog.warning = Some("another cauto process is refreshing this catalog".into());
@@ -472,11 +486,11 @@ impl CatalogManager<'_> {
                 "another cauto process is refreshing the missing catalog",
             ));
         };
-        if !bundled_only
-            && let Ok(reloaded) = cached_source.load(request)
-            && (!refresh || reloaded.fetched_at_unix > original_fetched_at)
-        {
-            return Ok(reloaded);
+        if !bundled_only && let Ok(reloaded) = cached_source.load(request) {
+            let refreshed_while_waiting = reloaded.fetched_at_unix > original_fetched_at;
+            if (!refresh && !reloaded.stale) || (refresh && refreshed_while_waiting) {
+                return Ok(reloaded);
+            }
         }
         let version = match version::load_or_probe(
             self.paths,

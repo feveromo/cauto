@@ -25,13 +25,14 @@ Git is the only optional pre-launch subprocess and is bounded by one command.
 
 ## Configuration And Policy
 
-External TOML deserializes into `RawConfig`. Each layer is validated with its
-source path before typed field-by-field merging into `ValidatedConfig`.
-Precedence is cauto CLI, explicit native model/reasoning/tier, project config,
-user config, router, then conservative defaults. Duplicate project rule IDs
-replace lower-layer IDs. Contradictory bounds inside one rule are rejected;
-conflicts between independently matched rules remain visible and reduce
-confidence.
+User TOML deserializes into `RawConfig`; repository TOML deserializes into the
+separate `ProjectPolicy`, which accepts only `version` and `rules`. Each layer
+is validated with its source path before project rules are merged into
+`ValidatedConfig`. Precedence is cauto CLI, explicit native
+model/reasoning/tier, project rules, user config, router, then conservative
+defaults. Duplicate project rule IDs replace lower-layer IDs. Contradictory
+bounds inside one rule are rejected; conflicts between independently matched
+rules remain visible and reduce confidence.
 
 Rules are metadata only. Aho-Corasick maps phrase patterns back to typed rules,
 and GlobSet maps mentioned paths back to rules. Each matched rule applies at
@@ -66,10 +67,11 @@ are ignored. The fallback knows Sol/Terra/Luna IDs but never claims Max or
 Ultra.
 
 Cache envelopes include schema/cauto/Codex versions, fingerprint, `CODEX_HOME`
-hash, profile, timestamps, source, payload SHA-256, and catalog. Valid stale
-data is used without a warm refresh. Missing or explicit refreshes share a
-bounded refresh lock. Writes use a same-directory unique temporary file,
-flush, data sync, atomic rename, and restrictive permissions.
+hash, profile, timestamps, source, payload SHA-256, and catalog. Fresh cache
+returns immediately. Missing, stale, and explicit refreshes share a bounded
+refresh lock; a failed stale refresh returns the prior catalog with a warning.
+Writes use a same-directory unique temporary file, flush, data sync, atomic
+rename, and restrictive permissions.
 
 Max and Ultra are internal capability requests until a selected model exposes
 literal `max` or `ultra` through the installed catalog. Unsupported automatic
@@ -83,6 +85,8 @@ an API client. The child receives `CAUTO_CLASSIFIER=1`, uses a fresh private
 directory, read-only sandbox, ephemeral session, low effort, schema path, and
 bounded prompt metadata. Unix assigns a process group so timeout terminates and
 reaps descendants. Temporary files are removed on every return path.
+Preview modes suppress this child by default and expose `--run-classifier` as
+an explicit quota-spending opt-in.
 
 ## Launch Boundary
 

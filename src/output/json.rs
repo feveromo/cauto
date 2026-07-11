@@ -23,12 +23,19 @@ struct JsonLaunch<'a> {
 }
 
 #[derive(Serialize)]
+struct JsonClassifier<'a> {
+    ran: bool,
+    outcome: &'a str,
+}
+
+#[derive(Serialize)]
 struct JsonOutput<'a> {
     schema_version: u32,
     decision: JsonDecision<'a>,
     dimensions: crate::routing::DimensionScores,
     matches: &'a [crate::routing::RuleMatch],
     conflicts: &'a [crate::routing::Conflict],
+    classifier: JsonClassifier<'a>,
     launch: JsonLaunch<'a>,
 }
 
@@ -38,6 +45,8 @@ pub fn render(
     downgrade: Option<&Downgrade>,
     mode: LaunchMode,
     working_directory: &str,
+    classifier_ran: bool,
+    classifier_outcome: &str,
 ) -> Result<String, serde_json::Error> {
     serde_json::to_string_pretty(&JsonOutput {
         schema_version: 1,
@@ -55,6 +64,10 @@ pub fn render(
         dimensions: decision.dimensions,
         matches: &decision.matched_rules,
         conflicts: &decision.conflicts,
+        classifier: JsonClassifier {
+            ran: classifier_ran,
+            outcome: classifier_outcome,
+        },
         launch: JsonLaunch {
             mode,
             working_directory,

@@ -51,6 +51,141 @@ fn multiline_prompt_is_redacted_from_json() {
 }
 
 #[test]
+fn previews_do_not_start_classifier_without_explicit_opt_in() {
+    let home = tempdir().unwrap();
+    let codex = common::fake_codex(home.path());
+    let invocation_log = home.path().join("codex-invocations.log");
+
+    common::cauto_command(home.path())
+        .env("FAKE_CODEX_LOG", &invocation_log)
+        .args([
+            "--codex-bin",
+            codex.to_str().unwrap(),
+            "--classifier",
+            "always",
+            "--dry-run",
+            "--prompt",
+            "figure out why this is broken",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Classifier: would run"));
+
+    common::cauto_command(home.path())
+        .env("FAKE_CODEX_LOG", &invocation_log)
+        .args([
+            "--codex-bin",
+            codex.to_str().unwrap(),
+            "explain",
+            "--classifier",
+            "always",
+            "--prompt",
+            "figure out why this is broken",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Classifier: would run"));
+
+    let invocations = std::fs::read_to_string(&invocation_log).unwrap();
+    assert!(!invocations.lines().any(|line| line.starts_with("exec ")));
+}
+
+#[test]
+fn preview_classifier_can_be_explicitly_requested() {
+    let home = tempdir().unwrap();
+    let codex = common::fake_codex(home.path());
+    let invocation_log = home.path().join("codex-invocations.log");
+
+    common::cauto_command(home.path())
+        .env("FAKE_CODEX_LOG", &invocation_log)
+        .args([
+            "--codex-bin",
+            codex.to_str().unwrap(),
+            "--classifier",
+            "always",
+            "--run-classifier",
+            "--dry-run",
+            "--prompt",
+            "figure out why this is broken",
+        ])
+        .assert()
+        .success();
+
+    let invocations = std::fs::read_to_string(&invocation_log).unwrap();
+    assert!(invocations.lines().any(|line| line.starts_with("exec ")));
+}
+
+#[test]
+fn matched_rule_conflicts_reach_json_and_reduce_confidence() {
+    let home = tempdir().unwrap();
+    let repository = home.path().join("repository");
+    std::fs::create_dir(&repository).unwrap();
+    std::fs::write(
+        repository.join(".cauto.toml"),
+        r#"
+version = 1
+
+[[rules]]
+id = "safety-floor"
+phrases = ["policy floor"]
+family_floor = "sol"
+reason = "requires the strongest family"
+
+[[rules]]
+id = "cost-ceiling"
+phrases = ["cost ceiling"]
+family_ceiling = "luna"
+reason = "requires the cheapest family"
+"#,
+    )
+    .unwrap();
+    let codex = common::fake_codex(home.path());
+    let base_args = [
+        "--repo",
+        repository.to_str().unwrap(),
+        "--codex-bin",
+        codex.to_str().unwrap(),
+        "--dry-run",
+        "--json",
+        "policy floor and cost ceiling",
+    ];
+    let with_policy = common::cauto_command(home.path())
+        .args(base_args)
+        .output()
+        .unwrap();
+    assert!(with_policy.status.success());
+    let with_policy: serde_json::Value = serde_json::from_slice(&with_policy.stdout).unwrap();
+
+    let without_policy = common::cauto_command(home.path())
+        .args(base_args)
+        .arg("--no-project-policy")
+        .output()
+        .unwrap();
+    assert!(without_policy.status.success());
+    let without_policy: serde_json::Value = serde_json::from_slice(&without_policy.stdout).unwrap();
+
+    let conflict_kinds: Vec<_> = with_policy["conflicts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|conflict| conflict["kind"].as_str())
+        .collect();
+    assert!(
+        conflict_kinds.contains(&"matched-family-bounds"),
+        "unexpected route output: {with_policy:#}"
+    );
+    assert!(
+        conflict_kinds.contains(&"family-floor-ceiling"),
+        "unexpected route output: {with_policy:#}"
+    );
+    assert!(
+        with_policy["decision"]["confidence_basis_points"].as_u64()
+            < without_policy["decision"]["confidence_basis_points"].as_u64()
+    );
+    assert_eq!(with_policy["classifier"]["outcome"], "would-run");
+}
+
+#[test]
 fn prompt_file_and_stdin_are_supported() {
     let home = tempdir().unwrap();
     let codex = common::fake_codex(home.path());

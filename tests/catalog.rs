@@ -38,6 +38,13 @@ fn paths(root: &std::path::Path) -> CautoPaths {
     }
 }
 
+fn expire_catalog_cache(path: &std::path::Path) {
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    value["fetched_at_unix"] = serde_json::json!(0);
+    std::fs::write(path, serde_json::to_vec(&value).unwrap()).unwrap();
+}
+
 struct CountingRunner {
     calls: AtomicUsize,
     fail_live: bool,
@@ -108,6 +115,75 @@ fn version_probe_is_cached_by_fingerprint() {
         version::load_or_probe(&paths, &install, &runner, Duration::from_secs(1), false).unwrap();
     assert_eq!(first, second);
     assert_eq!(runner.calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn stale_catalog_is_refreshed_while_fresh_catalog_returns_immediately() {
+    let root = tempdir().unwrap();
+    let paths = paths(root.path());
+    let runner = CountingRunner::new();
+    let manager = CatalogManager {
+        paths: &paths,
+        runner: &runner,
+    };
+    let request = CatalogRequest {
+        installation: installation(),
+        timeout: Duration::from_secs(1),
+        max_age: Duration::from_secs(60),
+        include_hidden: true,
+    };
+    manager.load(&request, false, false).unwrap();
+
+    runner.calls.store(0, Ordering::SeqCst);
+    let fresh = manager.load(&request, false, false).unwrap();
+    assert_eq!(fresh.source, CapabilitySource::Cache);
+    assert_eq!(runner.calls.load(Ordering::SeqCst), 0);
+
+    expire_catalog_cache(&manager.cache_path(&request.installation));
+    let refreshed = manager.load(&request, false, false).unwrap();
+    assert_eq!(refreshed.source, CapabilitySource::DebugModels);
+    assert!(!refreshed.stale);
+    assert!(runner.calls.load(Ordering::SeqCst) > 0);
+}
+
+#[test]
+fn stale_catalog_falls_back_with_warning_when_refresh_fails() {
+    let root = tempdir().unwrap();
+    let paths = paths(root.path());
+    let initial_runner = CountingRunner::new();
+    let initial_manager = CatalogManager {
+        paths: &paths,
+        runner: &initial_runner,
+    };
+    let request = CatalogRequest {
+        installation: installation(),
+        timeout: Duration::from_millis(10),
+        max_age: Duration::from_secs(60),
+        include_hidden: true,
+    };
+    initial_manager.load(&request, false, false).unwrap();
+    expire_catalog_cache(&initial_manager.cache_path(&request.installation));
+
+    let failing_runner = CountingRunner {
+        calls: AtomicUsize::new(0),
+        fail_live: false,
+        timeout: true,
+    };
+    let manager = CatalogManager {
+        paths: &paths,
+        runner: &failing_runner,
+    };
+    let stale = manager.load(&request, false, false).unwrap();
+
+    assert_eq!(stale.source, CapabilitySource::Cache);
+    assert!(stale.stale);
+    assert!(
+        stale
+            .warning
+            .as_deref()
+            .is_some_and(|warning| warning.contains("using stale cache"))
+    );
+    assert_eq!(failing_runner.calls.load(Ordering::SeqCst), 2);
 }
 
 #[test]

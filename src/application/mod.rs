@@ -74,6 +74,7 @@ fn merge_route_args(root: &RouteArgs, subcommand: RouteArgs) -> Result<RouteArgs
         || root.allow_downgrade
         || root.classifier.is_some()
         || root.no_classifier
+        || root.run_classifier
         || root.offline
         || root.dry_run
         || root.print_command

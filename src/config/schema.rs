@@ -29,6 +29,25 @@ pub struct RawConfig {
     pub rules: Vec<RawRule>,
 }
 
+/// Repository-owned policy. Usage, billing, logging, and runtime controls are user-only.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectPolicy {
+    pub version: Option<u32>,
+    #[serde(default)]
+    pub rules: Vec<RawRule>,
+}
+
+impl From<ProjectPolicy> for RawConfig {
+    fn from(policy: ProjectPolicy) -> Self {
+        Self {
+            version: policy.version,
+            rules: policy.rules,
+            ..Self::default()
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Deserialize)]
 pub struct RawWeights {
     pub scope: Option<u16>,

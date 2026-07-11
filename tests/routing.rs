@@ -2,7 +2,7 @@ use cauto::routing::select::effort_for;
 use cauto::routing::select::effort_with_hysteresis;
 use cauto::routing::select::family_with_hysteresis;
 use cauto::routing::{
-    BoundedScore, DimensionScores, EvidenceQuality, ModelFamily, ReasoningLevel,
+    BoundedScore, Conflict, DimensionScores, EvidenceQuality, ModelFamily, ReasoningLevel,
     SelectionConstraints, TaskType, Weights, normalized_score, route,
 };
 use proptest::prelude::*;
@@ -31,11 +31,11 @@ proptest! {
         let dimensions = dimensions(values);
         let first = route(
             TaskType::Coding, dimensions, Weights::default(),
-            SelectionConstraints::default(), vec![], EvidenceQuality::default(), vec![], vec![],
+            SelectionConstraints::default(), vec![], vec![], EvidenceQuality::default(), vec![], vec![],
         );
         let second = route(
             TaskType::Coding, dimensions, Weights::default(),
-            SelectionConstraints::default(), vec![], EvidenceQuality::default(), vec![], vec![],
+            SelectionConstraints::default(), vec![], vec![], EvidenceQuality::default(), vec![], vec![],
         );
         prop_assert_eq!(first, second);
     }
@@ -65,6 +65,7 @@ fn family_floor_is_never_violated() {
             ..SelectionConstraints::default()
         },
         vec![],
+        vec![],
         EvidenceQuality::default(),
         vec![],
         vec![],
@@ -82,6 +83,7 @@ fn unsupported_ultra_cannot_be_selected_without_authorization() {
             meaningful_parallel_tracks: true,
             ..SelectionConstraints::default()
         },
+        vec![],
         vec![],
         EvidenceQuality::default(),
         vec![],
@@ -129,10 +131,59 @@ fn route_applies_repository_hysteresis() {
             ..SelectionConstraints::default()
         },
         vec![],
+        vec![],
         EvidenceQuality::default(),
         vec![],
         vec![],
     );
     assert_eq!(decision.normalized_score, 46);
     assert_eq!(decision.recommended_effort, ReasoningLevel::Medium);
+}
+
+#[test]
+fn rule_conflicts_survive_selection_and_reduce_confidence() {
+    let constraints = SelectionConstraints {
+        family_floor: Some(ModelFamily::Sol),
+        family_ceiling: Some(ModelFamily::Luna),
+        ..SelectionConstraints::default()
+    };
+    let baseline = route(
+        TaskType::Coding,
+        DimensionScores::default(),
+        Weights::default(),
+        constraints.clone(),
+        vec![],
+        vec![],
+        EvidenceQuality::default(),
+        vec![],
+        vec![],
+    );
+    let decision = route(
+        TaskType::Coding,
+        DimensionScores::default(),
+        Weights::default(),
+        constraints,
+        vec![],
+        vec![Conflict {
+            kind: "matched-family-bounds".into(),
+            message: "conflict produced while applying matched rules".into(),
+        }],
+        EvidenceQuality::default(),
+        vec![],
+        vec![],
+    );
+
+    assert!(
+        decision
+            .conflicts
+            .iter()
+            .any(|conflict| conflict.kind == "matched-family-bounds")
+    );
+    assert!(
+        decision
+            .conflicts
+            .iter()
+            .any(|conflict| conflict.kind == "family-floor-ceiling")
+    );
+    assert!(decision.confidence < baseline.confidence);
 }

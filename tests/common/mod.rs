@@ -12,6 +12,9 @@ pub fn fake_codex(directory: &Path) -> PathBuf {
     let catalog = include_str!("../fixtures/catalog.json");
     let script = format!(
         "#!/bin/sh\n\
+         if [ -n \"$FAKE_CODEX_LOG\" ]; then\n\
+           printf '%s\\n' \"$*\" >> \"$FAKE_CODEX_LOG\"\n\
+         fi\n\
          if [ \"$1\" = \"--version\" ]; then\n\
            echo 'codex-cli test-1.0'\n\
            exit 0\n\
