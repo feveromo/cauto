@@ -1,15 +1,35 @@
 # cauto
 
-`cauto` is a fast, repository-aware session-start router for the native OpenAI
-Codex CLI. It scores a task, resolves the lowest capable installed model and
-reasoning effort, explains the choice, records a redacted decision, and then
-replaces itself with the real `codex` process on Unix.
+> Start Codex at the right capability level—automatically, transparently, and
+> without changing how you use Codex.
+
+[![Rust 1.89+](https://img.shields.io/badge/Rust-1.89%2B-dea584?logo=rust&logoColor=white)](https://www.rust-lang.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-4c1?logo=opensourceinitiative&logoColor=white)](LICENSE)
+[![Native Codex launcher](https://img.shields.io/badge/launches-native%20Codex-101828?logo=openai&logoColor=white)](https://github.com/openai/codex)
+
+`cauto` is a fast, repository-aware launcher for the native OpenAI Codex CLI.
+It scores a task, selects the lowest capable installed model and reasoning
+effort, explains the choice, records a redacted decision, and then replaces
+itself with the real `codex` process on Unix.
+
+```text
+your task ──> cauto scores the work ──> picks a capable route ──> native codex
+```
 
 It is a transparent launcher. It reuses the native CLI's existing ChatGPT
 authentication, subscription allowance, config, profiles, MCP servers, rules,
 skills, permissions, sandbox, and terminal behavior. It is not an API proxy,
 alternate TUI, provider bridge, or billing layer, and it never configures an API
 key.
+
+## Why cauto?
+
+- **Spend capability deliberately.** Straightforward work stays light; risky,
+  ambiguous, or architectural work gets the headroom it needs.
+- **Keep Codex native.** Your existing authentication, profiles, rules, MCP
+  servers, skills, permissions, and terminal flow remain the source of truth.
+- **See and control every decision.** Preview routes, set explicit overrides,
+  and retain only redacted decision records—never raw prompts.
 
 ## Install
 
