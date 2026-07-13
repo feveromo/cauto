@@ -12,12 +12,135 @@ use crate::error::AppError;
 use crate::output;
 use crate::routing::{
     CapabilitySource, ClassifierMode, Confidence, EvidenceQuality, FastMode, LaunchMode,
-    LaunchPlan, ModelFamily, Reason, ReasoningLevel, RuleSource, extract_features, route,
+    LaunchPlan, ModelFamily, Reason, ReasoningLevel, RuleSource, TaskType, extract_features, route,
 };
 
 use super::decision::{DecisionLogInput, write as write_decision};
 use super::prompt;
 use super::{catalog_for, load_context_and_config, resolve_installation};
+
+const AGENT_HYSTERESIS_POINTS: u8 = 4;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum OutcomeBias {
+    Underpowered,
+    Overkill,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(super) struct SessionRouteContext {
+    pub prior_family: Option<ModelFamily>,
+    pub prior_effort: Option<ReasoningLevel>,
+    pub outcome_bias: Option<OutcomeBias>,
+}
+
+pub(super) struct ResolvedRoute {
+    pub context: crate::context::ContextSnapshot,
+    pub loaded: crate::config::LoadedConfig,
+    pub paths: crate::paths::CautoPaths,
+    pub catalog: crate::codex::catalog::ModelCatalog,
+    pub prompt: prompt::PromptInput,
+    pub decision: crate::routing::RouteDecision,
+    pub plan: LaunchPlan,
+    pub policy: InjectionPolicy,
+    pub classifier_ran: bool,
+    pub classifier_outcome: String,
+}
+
+fn promoted_family(family: &ModelFamily) -> ModelFamily {
+    match family {
+        ModelFamily::Luna => ModelFamily::Terra,
+        ModelFamily::Terra => ModelFamily::Sol,
+        ModelFamily::Sol => ModelFamily::Sol,
+        ModelFamily::Other(value) => ModelFamily::Other(value.clone()),
+    }
+}
+
+fn demoted_family(family: &ModelFamily) -> ModelFamily {
+    match family {
+        ModelFamily::Luna => ModelFamily::Luna,
+        ModelFamily::Terra => ModelFamily::Luna,
+        ModelFamily::Sol | ModelFamily::Other(_) => ModelFamily::Terra,
+    }
+}
+
+const fn promoted_effort(effort: ReasoningLevel) -> ReasoningLevel {
+    match effort {
+        ReasoningLevel::Minimal | ReasoningLevel::Low => ReasoningLevel::Medium,
+        ReasoningLevel::Medium => ReasoningLevel::High,
+        ReasoningLevel::High => ReasoningLevel::ExtraHigh,
+        ReasoningLevel::ExtraHigh => ReasoningLevel::Max,
+        ReasoningLevel::Max => ReasoningLevel::Max,
+        ReasoningLevel::Ultra => ReasoningLevel::Ultra,
+    }
+}
+
+const fn demoted_effort(effort: ReasoningLevel) -> ReasoningLevel {
+    match effort {
+        ReasoningLevel::Minimal | ReasoningLevel::Low => ReasoningLevel::Low,
+        ReasoningLevel::Medium => ReasoningLevel::Low,
+        ReasoningLevel::High => ReasoningLevel::Medium,
+        ReasoningLevel::ExtraHigh => ReasoningLevel::High,
+        ReasoningLevel::Max | ReasoningLevel::Ultra => ReasoningLevel::ExtraHigh,
+    }
+}
+
+fn apply_session_context(
+    constraints: &mut crate::routing::SelectionConstraints,
+    session: Option<&SessionRouteContext>,
+) {
+    let Some(session) = session else {
+        return;
+    };
+    constraints.hysteresis_points = constraints.hysteresis_points.max(AGENT_HYSTERESIS_POINTS);
+    constraints.prior_family.clone_from(&session.prior_family);
+    constraints.prior_effort = session.prior_effort;
+    match session.outcome_bias {
+        Some(OutcomeBias::Underpowered) => {
+            if let Some(prior) = &session.prior_family {
+                let floor = promoted_family(prior);
+                if constraints
+                    .family_floor
+                    .as_ref()
+                    .is_none_or(|current| current.rank() < floor.rank())
+                {
+                    constraints.family_floor = Some(floor);
+                }
+            }
+            if let Some(prior) = session.prior_effort {
+                let floor = promoted_effort(prior);
+                if constraints
+                    .effort_floor
+                    .is_none_or(|current| current < floor)
+                {
+                    constraints.effort_floor = Some(floor);
+                }
+            }
+        }
+        Some(OutcomeBias::Overkill) => {
+            if let Some(prior) = &session.prior_family {
+                let ceiling = demoted_family(prior);
+                if constraints
+                    .family_ceiling
+                    .as_ref()
+                    .is_none_or(|current| current.rank() > ceiling.rank())
+                {
+                    constraints.family_ceiling = Some(ceiling);
+                }
+            }
+            if let Some(prior) = session.prior_effort {
+                let ceiling = demoted_effort(prior);
+                if constraints
+                    .effort_ceiling
+                    .is_none_or(|current| current > ceiling)
+                {
+                    constraints.effort_ceiling = Some(ceiling);
+                }
+            }
+        }
+        None => {}
+    }
+}
 
 fn effective_fast(args: &RouteArgs, config: &crate::config::LoadedConfig) -> FastMode {
     if args.fast {
@@ -87,12 +210,13 @@ fn reconcile_explicit(args: &RouteArgs, native: &ExplicitNativeOverrides) -> Res
     Ok(())
 }
 
-pub(super) fn run_route(
+pub(super) fn resolve_route(
     global: &GlobalArgs,
-    args: RouteArgs,
+    args: &RouteArgs,
     mode: LaunchMode,
     explain: bool,
-) -> Result<ExitCode, AppError> {
+    session: Option<&SessionRouteContext>,
+) -> Result<ResolvedRoute, AppError> {
     if args
         .forwarded
         .first()
@@ -100,13 +224,13 @@ pub(super) fn run_route(
         == Some("resume")
     {
         return Err(AppError::InvalidArguments(
-            "cauto v1 does not reroute resumed sessions; use native `codex resume`".into(),
+            "the one-shot launcher does not reroute resumed sessions; use `cauto agent --resume THREAD_ID` or native `codex resume`".into(),
         ));
     }
-    let prompt = prompt::acquire(&args, mode)?;
+    let prompt = prompt::acquire(args, mode)?;
     let native = inspect_forwarded(&args.forwarded)?;
-    reconcile_explicit(&args, &native)?;
-    let (context, loaded, paths) = load_context_and_config(global, Some(&args))?;
+    reconcile_explicit(args, &native)?;
+    let (context, loaded, paths) = load_context_and_config(global, Some(args))?;
     let installation = resolve_installation(global, &native)?;
     let catalog = catalog_for(&paths, &loaded, &installation, false, args.offline)?;
     let features = extract_features(&prompt.analysis);
@@ -129,18 +253,21 @@ pub(super) fn run_route(
             }
         }
     }
-    match crate::state::decision_log::latest_route(&paths.decisions(), &repository_id) {
-        Ok(Some((family, effort))) => {
-            constraints.prior_family = Some(family);
-            constraints.prior_effort = Some(effort);
-        }
-        Ok(None) => {}
-        Err(error) => {
-            if global.verbose {
-                eprintln!("cauto: decision history unavailable for hysteresis: {error}");
+    if session.is_none() && constraints.hysteresis_points > 0 {
+        match crate::state::decision_log::latest_route(&paths.decisions(), &repository_id) {
+            Ok(Some((family, effort))) => {
+                constraints.prior_family = Some(family);
+                constraints.prior_effort = Some(effort);
+            }
+            Ok(None) => {}
+            Err(error) => {
+                if global.verbose {
+                    eprintln!("cauto: decision history unavailable for hysteresis: {error}");
+                }
             }
         }
     }
+    apply_session_context(&mut constraints, session);
     constraints.explicit_family = args
         .family
         .as_deref()
@@ -184,6 +311,19 @@ pub(super) fn run_route(
             .count()
             >= 2;
     let mut reasons = features.reasons.clone();
+    if let Some(session) = session {
+        match session.outcome_bias {
+            Some(OutcomeBias::Underpowered) => reasons.push(Reason {
+                label: "same-thread correction or repeated failure".into(),
+                contribution: 20,
+            }),
+            Some(OutcomeBias::Overkill) => reasons.push(Reason {
+                label: "same-thread overkill correction".into(),
+                contribution: -20,
+            }),
+            None => {}
+        }
+    }
     reasons.extend(applied.matches.iter().map(|matched| Reason {
         label: matched.reason.clone(),
         contribution: i16::from(
@@ -222,20 +362,29 @@ pub(super) fn run_route(
     );
     let mut classifier_ran = false;
     let mut classifier_outcome = "skipped".to_owned();
-    let classifier_mode = effective_classifier(&args, &loaded);
+    let classifier_mode = effective_classifier(args, &loaded);
     let luna = catalog.first_family(&ModelFamily::Luna);
-    let classifier_would_run = classifier::should_run(
-        classifier_mode,
-        decision.confidence,
-        loaded.config.classifier_confidence_threshold_basis_points,
-        !decision.conflicts.is_empty(),
-        decision.matched_rules.len(),
-        prompt.valid_utf8,
-        (args.model.is_some() || native.model.is_some())
-            && (args.effort.is_some() || native.effort_raw.is_some()),
-        args.offline,
-        luna.is_some(),
-    ) && prompt.original.is_some();
+    let deterministic_semantic_gap = features.task_type == TaskType::Coding
+        && features.reasons.is_empty()
+        && features.escalation_signals.is_empty()
+        && decision.matched_rules.is_empty();
+    let classifier_candidate = classifier_mode != ClassifierMode::Auto
+        || deterministic_semantic_gap
+        || !decision.conflicts.is_empty();
+    let classifier_would_run = classifier_candidate
+        && classifier::should_run(
+            classifier_mode,
+            decision.confidence,
+            loaded.config.classifier_confidence_threshold_basis_points,
+            !decision.conflicts.is_empty(),
+            decision.matched_rules.len(),
+            prompt.valid_utf8,
+            (args.model.is_some() || native.model.is_some())
+                && (args.effort.is_some() || native.effort_raw.is_some()),
+            args.offline,
+            luna.is_some(),
+        )
+        && prompt.original.is_some();
     if classifier_would_run && (args.dry_run || explain) && !args.run_classifier {
         classifier_outcome = "would-run".into();
     } else if classifier_would_run && let (Some(luna), Some(_)) = (luna, prompt.original.as_ref()) {
@@ -253,13 +402,21 @@ pub(super) fn run_route(
                 classifier_outcome = result.category;
                 let dimensions =
                     classifier::blend_dimensions(decision.dimensions, &result.assessment);
+                let task_type = if matches!(
+                    features.task_type,
+                    TaskType::Empty | TaskType::Documentation | TaskType::Mechanical
+                ) {
+                    features.task_type.clone()
+                } else {
+                    result.assessment.task_type.clone()
+                };
                 let mut merged_reasons = reasons;
                 merged_reasons.extend(result.assessment.reasons.clone());
                 let mut merged_signals = features.escalation_signals.clone();
                 merged_signals.extend(result.assessment.escalation_signals.clone());
                 let deterministic_confidence = decision.confidence.basis_points();
                 decision = route(
-                    features.task_type.clone(),
+                    task_type,
                     dimensions,
                     loaded.config.weights,
                     constraints.clone(),
@@ -303,7 +460,7 @@ pub(super) fn run_route(
     let fast_mode = if native.service_tier.is_some() {
         FastMode::Inherit
     } else {
-        effective_fast(&args, &loaded)
+        effective_fast(args, &loaded)
     };
     let resolved = resolve_preset(
         &catalog,
@@ -342,6 +499,40 @@ pub(super) fn run_route(
         inject_effort: native.effort_raw.is_none(),
         inject_service_tier: native.service_tier.is_none() && plan.preset.service_tier.is_some(),
     };
+    Ok(ResolvedRoute {
+        context,
+        loaded,
+        paths,
+        catalog,
+        prompt,
+        decision,
+        plan,
+        policy,
+        classifier_ran,
+        classifier_outcome,
+    })
+}
+
+pub(super) fn run_route(
+    global: &GlobalArgs,
+    args: RouteArgs,
+    mode: LaunchMode,
+    explain: bool,
+) -> Result<ExitCode, AppError> {
+    let resolved = resolve_route(global, &args, mode, explain, None)?;
+    let ResolvedRoute {
+        context,
+        loaded,
+        paths,
+        catalog,
+        prompt,
+        decision,
+        plan,
+        policy,
+        classifier_ran,
+        classifier_outcome,
+        ..
+    } = resolved;
     let command_args = materialize_args(&plan, policy);
     if global.json {
         println!(
@@ -383,7 +574,7 @@ pub(super) fn run_route(
             preview(plan.codex_binary.as_os_str(), &command_args)
         );
     }
-    write_decision(DecisionLogInput {
+    let _ = write_decision(DecisionLogInput {
         paths: &paths,
         context: &context,
         catalog: &catalog,
@@ -393,7 +584,11 @@ pub(super) fn run_route(
         policy,
         classifier_ran,
         classifier_outcome: &classifier_outcome,
-        preview: args.dry_run || explain,
+        decision_mode: if args.dry_run || explain {
+            "preview"
+        } else {
+            "launched"
+        },
         strict: loaded.config.strict_logging,
         quiet: global.quiet,
     })?;
@@ -404,4 +599,59 @@ pub(super) fn run_route(
         println!("Launching native Codex...");
     }
     crate::codex::launch::execute(&plan, policy)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::routing::{
+        DimensionScores, EvidenceQuality, SelectionConstraints, TaskType, Weights,
+    };
+
+    #[test]
+    fn underpowered_outcome_promotes_one_step_and_enables_thread_hysteresis() {
+        let mut constraints = SelectionConstraints::default();
+        apply_session_context(
+            &mut constraints,
+            Some(&SessionRouteContext {
+                prior_family: Some(ModelFamily::Terra),
+                prior_effort: Some(ReasoningLevel::Medium),
+                outcome_bias: Some(OutcomeBias::Underpowered),
+            }),
+        );
+        assert_eq!(constraints.hysteresis_points, AGENT_HYSTERESIS_POINTS);
+        assert_eq!(constraints.family_floor, Some(ModelFamily::Sol));
+        assert_eq!(constraints.effort_floor, Some(ReasoningLevel::High));
+    }
+
+    #[test]
+    fn overkill_outcome_cannot_override_existing_safety_floors() {
+        let mut constraints = SelectionConstraints {
+            family_floor: Some(ModelFamily::Sol),
+            effort_floor: Some(ReasoningLevel::Max),
+            ..SelectionConstraints::default()
+        };
+        apply_session_context(
+            &mut constraints,
+            Some(&SessionRouteContext {
+                prior_family: Some(ModelFamily::Sol),
+                prior_effort: Some(ReasoningLevel::Max),
+                outcome_bias: Some(OutcomeBias::Overkill),
+            }),
+        );
+        let decision = route(
+            TaskType::Coding,
+            DimensionScores::default(),
+            Weights::default(),
+            constraints,
+            Vec::new(),
+            Vec::new(),
+            EvidenceQuality::default(),
+            Vec::new(),
+            Vec::new(),
+        );
+        assert_eq!(decision.recommended_family, ModelFamily::Sol);
+        assert_eq!(decision.recommended_effort, ReasoningLevel::Max);
+        assert_eq!(decision.conflicts.len(), 2);
+    }
 }

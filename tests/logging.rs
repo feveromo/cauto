@@ -117,17 +117,25 @@ fn report_summarizes_routes_and_rules() {
             "record_type": "feedback",
             "decision_id": "id-0",
             "repository_identifier": "repo",
-            "feedback": "right"
+            "feedback": "right",
+            "source": "implicit-correction"
         }))
         .unwrap(),
     )
     .unwrap();
     let report = build_report(&path).unwrap();
     assert_eq!(report.total_decisions, 4);
+    assert_eq!(report.total_launched_decisions, 4);
+    assert_eq!(report.total_preview_decisions, 0);
+    assert_eq!(report.total_legacy_decisions, 0);
     assert_eq!(report.average_confidence_basis_points, 8_000);
     assert_eq!(report.classifier_invocation_rate_basis_points, 5_000);
     assert_eq!(report.rules_most_often_raising_effort[0].0, "raise");
     assert_eq!(report.feedback_by_route["terra:medium"]["right"], 1);
+    assert_eq!(
+        report.feedback_source_distribution["implicit-correction"],
+        1
+    );
     assert_eq!(
         report.feedback_by_repository[0].repository_identifier,
         "repo"
@@ -144,6 +152,74 @@ fn missing_history_returns_an_empty_report() {
     let root = tempdir().unwrap();
     let report = build_report(&root.path().join("missing.jsonl")).unwrap();
     assert_eq!(report.total_decisions, 0);
+    assert_eq!(report.total_launched_decisions, 0);
+}
+
+#[test]
+fn report_separates_launched_preview_and_legacy_decisions() {
+    let root = tempdir().unwrap();
+    let path = root.path().join("decisions.jsonl");
+
+    let launched = record(1);
+    append_json_line(&path, &serde_json::to_vec(&launched).unwrap()).unwrap();
+
+    let mut preview = record(2);
+    preview.decision_mode = "preview".into();
+    preview.selected_family = ModelFamily::Sol;
+    preview.selected_effort = ReasoningLevel::Max;
+    append_json_line(&path, &serde_json::to_vec(&preview).unwrap()).unwrap();
+
+    let mut agent = record(4);
+    agent.decision_mode = "agent".into();
+    agent.selected_family = ModelFamily::Sol;
+    agent.selected_effort = ReasoningLevel::High;
+    append_json_line(&path, &serde_json::to_vec(&agent).unwrap()).unwrap();
+
+    let mut legacy = serde_json::to_value(record(3)).unwrap();
+    legacy.as_object_mut().unwrap().remove("decision_mode");
+    legacy["selected_family"] = serde_json::json!("luna");
+    legacy["selected_effort"] = serde_json::json!("low");
+    append_json_line(&path, &serde_json::to_vec(&legacy).unwrap()).unwrap();
+
+    let report = build_report(&path).unwrap();
+    assert_eq!(report.schema_version, 3);
+    assert_eq!(report.total_decisions, 4);
+    assert_eq!(report.total_launched_decisions, 2);
+    assert_eq!(report.total_agent_decisions, 1);
+    assert_eq!(report.total_preview_decisions, 1);
+    assert_eq!(report.total_legacy_decisions, 1);
+    assert_eq!(report.route_distribution["terra:medium"], 1);
+    assert_eq!(report.route_distribution["sol:high"], 1);
+    assert_eq!(report.agent_route_distribution["sol:high"], 1);
+    assert_eq!(report.preview_route_distribution["sol:max"], 1);
+    assert_eq!(report.legacy_route_distribution["luna:low"], 1);
+}
+
+#[test]
+fn report_surfaces_unrecognized_generic_baseline_launches() {
+    let root = tempdir().unwrap();
+    let path = root.path().join("decisions.jsonl");
+    let mut generic = record(1);
+    generic.dimensions = DimensionScores::default();
+    generic.complexity_score = 21;
+    generic.matched_rule_ids.clear();
+    append_json_line(&path, &serde_json::to_vec(&generic).unwrap()).unwrap();
+
+    let mut semantically_classified = record(2);
+    semantically_classified.dimensions = DimensionScores::default();
+    semantically_classified.complexity_score = 21;
+    semantically_classified.matched_rule_ids.clear();
+    semantically_classified.classifier_ran = true;
+    semantically_classified.classifier_outcome = "success".into();
+    append_json_line(
+        &path,
+        &serde_json::to_vec(&semantically_classified).unwrap(),
+    )
+    .unwrap();
+
+    let report = build_report(&path).unwrap();
+    assert_eq!(report.unresolved_generic_baseline_decisions, 1);
+    assert_eq!(report.unresolved_generic_baseline_rate_basis_points, 5_000);
 }
 
 #[test]

@@ -109,6 +109,9 @@ pub fn family_with_hysteresis(
     margin: u8,
 ) -> ModelFamily {
     let selected = family_for(dimensions, score);
+    if margin == 0 {
+        return selected;
+    }
     let Some(prior) = prior else {
         return selected;
     };
@@ -150,6 +153,9 @@ pub fn effort_with_hysteresis(
     margin: u8,
 ) -> ReasoningLevel {
     let selected = effort_for(score);
+    if margin == 0 {
+        return selected;
+    }
     let Some(prior) = prior else {
         return selected;
     };

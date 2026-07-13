@@ -31,6 +31,14 @@ fn contains_any(haystack: &str, needles: &[&str]) -> bool {
     needles.iter().any(|needle| haystack.contains(needle))
 }
 
+fn contains_word(haystack: &str, needles: &[&str]) -> bool {
+    haystack
+        .split(|character: char| {
+            !character.is_alphanumeric() && character != '\'' && character != '’'
+        })
+        .any(|word| needles.contains(&word))
+}
+
 fn raise_to(score: &mut BoundedScore, floor: u8) {
     if score.get() < floor {
         *score = BoundedScore::new(floor).expect("feature floors are bounded");
@@ -109,20 +117,44 @@ pub fn extract_features(prompt: &str) -> FeatureAssessment {
             "sync catalog",
         ],
     );
-    let diagnosis = contains_any(
+    let failure_symptom = contains_word(
         &normalized,
         &[
-            "diagnose",
-            "debug why",
-            "unknown root cause",
-            "investigate",
-            "intermittent",
+            "error", "failed", "failing", "failure", "won't", "wont", "won’t", "can't", "cant",
+            "can’t", "cannot", "broken", "crash", "crashed",
+        ],
+    ) || contains_any(
+        &normalized,
+        &["not working", "doesn't work", "doesnt work", "bugging out"],
+    );
+    let diagnosis = failure_symptom
+        || contains_any(
+            &normalized,
+            &[
+                "diagnose",
+                "debug why",
+                "unknown root cause",
+                "investigate",
+                "intermittent",
+            ],
+        );
+    let adversarial_research = contains_any(
+        &normalized,
+        &[
+            "exploit",
+            "exploitable",
+            "glitches",
+            "attack surface",
+            "abuse case",
+            "security audit",
+            "security review",
         ],
     );
-    let research = contains_any(
-        &normalized,
-        &["reverse engineer", "deobfuscat", "research", "reconstruct"],
-    );
+    let research = adversarial_research
+        || contains_any(
+            &normalized,
+            &["reverse engineer", "deobfuscat", "research", "reconstruct"],
+        );
     let architecture = contains_any(
         &normalized,
         &[
@@ -135,6 +167,10 @@ pub fn extract_features(prompt: &str) -> FeatureAssessment {
         ],
     );
     let review = normalized.contains("review") && !normalized.contains("reviewed");
+    let routing_subject = contains_any(
+        &normalized,
+        &["routing", "router", "route decision", "model selection"],
+    );
     let operational_audit = contains_any(
         &normalized,
         &[
@@ -145,7 +181,63 @@ pub fn extract_features(prompt: &str) -> FeatureAssessment {
             "routing usefully",
             "dogfood",
         ],
+    ) || routing_subject
+        && contains_any(
+            &normalized,
+            &[
+                "audit",
+                "evaluate",
+                "optimiz",
+                "doing its job",
+                "properly",
+                "feel off",
+                "feels off",
+                "decision quality",
+                "recent usage",
+                "recent sessions",
+            ],
+        );
+    let operational_context = contains_word(
+        &normalized,
+        &[
+            "launch",
+            "startup",
+            "connect",
+            "connection",
+            "reconnect",
+            "internet",
+            "network",
+            "mcp",
+            "oauth",
+            "service",
+            "daemon",
+            "process",
+            "port",
+            "desktop",
+            "browser",
+            "machine",
+            "session",
+            "runtime",
+        ],
+    ) || contains_any(
+        &normalized,
+        &[
+            "start up",
+            "won't start",
+            "wont start",
+            "won’t start",
+            "can't start",
+            "cant start",
+            "cannot start",
+            "won't open",
+            "wont open",
+            "won’t open",
+            "can't open",
+            "cant open",
+            "cannot open",
+        ],
     );
+    let operational_repair = failure_symptom && operational_context;
 
     if normalized.len() > 1_200 {
         dimensions.scope = dimensions.scope.saturating_add_signed(1);
@@ -168,7 +260,12 @@ pub fn extract_features(prompt: &str) -> FeatureAssessment {
         dimensions.verification_burden = dimensions.verification_burden.saturating_add_signed(1);
     }
     if diagnosis {
-        raise_to(&mut dimensions.ambiguity, 3);
+        let ambiguity_floor = if failure_symptom && clear_completion && !operational_repair {
+            2
+        } else {
+            3
+        };
+        raise_to(&mut dimensions.ambiguity, ambiguity_floor);
         reasons.push(Reason {
             label: "root-cause investigation".into(),
             contribution: 12,
@@ -179,6 +276,14 @@ pub fn extract_features(prompt: &str) -> FeatureAssessment {
         raise_to(&mut dimensions.architectural_depth, 3);
         escalation_signals.push(EscalationSignal {
             label: "research or reverse engineering".into(),
+        });
+    }
+    if adversarial_research {
+        raise_to(&mut dimensions.cost_of_being_wrong, 3);
+        raise_to(&mut dimensions.verification_burden, 3);
+        reasons.push(Reason {
+            label: "adversarial or exploit analysis".into(),
+            contribution: 15,
         });
     }
     if architecture {
@@ -197,6 +302,15 @@ pub fn extract_features(prompt: &str) -> FeatureAssessment {
         reasons.push(Reason {
             label: "operational routing audit".into(),
             contribution: 20,
+        });
+    }
+    if operational_repair {
+        raise_to(&mut dimensions.runtime_dependence, 3);
+        raise_to(&mut dimensions.cost_of_being_wrong, 3);
+        raise_to(&mut dimensions.verification_burden, 3);
+        reasons.push(Reason {
+            label: "live operational repair".into(),
+            contribution: 15,
         });
     }
     if contains_any(
@@ -382,6 +496,21 @@ fn extract_paths(prompt: &str) -> Vec<String> {
 mod tests {
     use super::*;
 
+    fn route_for(prompt: &str) -> crate::routing::RouteDecision {
+        let assessment = extract_features(prompt);
+        crate::routing::route(
+            assessment.task_type,
+            assessment.dimensions,
+            crate::routing::Weights::default(),
+            crate::routing::SelectionConstraints::default(),
+            vec![],
+            vec![],
+            crate::routing::EvidenceQuality::default(),
+            assessment.reasons,
+            assessment.escalation_signals,
+        )
+    }
+
     #[test]
     fn empty_prompt_is_not_classified_as_cheap_work() {
         let assessment = extract_features("");
@@ -425,6 +554,85 @@ mod tests {
                 assessment.dimensions,
                 crate::routing::Weights::default()
             ) >= 46
+        );
+    }
+
+    #[test]
+    fn natural_language_operational_failures_require_sol_high() {
+        for prompt in [
+            "telegram wont launch pls fix",
+            "chrome won't connect to the internet but the network is up",
+            "the desktop app is bugging out and cannot connect to this machine",
+        ] {
+            let decision = route_for(prompt);
+            assert_eq!(decision.task_type, TaskType::Diagnosis, "{prompt}");
+            assert_eq!(
+                decision.recommended_family,
+                crate::routing::ModelFamily::Sol
+            );
+            assert!(
+                decision.recommended_effort >= crate::routing::ReasoningLevel::High,
+                "{prompt}: {:?}",
+                decision.dimensions
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_failing_test_is_not_mistaken_for_live_operations() {
+        let decision = route_for("fix the failing unit test with the expected output");
+        assert_eq!(decision.task_type, TaskType::Diagnosis);
+        assert!(decision.dimensions.runtime_dependence.get() <= 1);
+        assert_eq!(
+            decision.recommended_family,
+            crate::routing::ModelFamily::Terra
+        );
+    }
+
+    #[test]
+    fn words_containing_cant_are_not_failure_symptoms() {
+        let assessment = extract_features("make a significant local improvement");
+        assert_eq!(assessment.task_type, TaskType::Coding);
+        assert_eq!(assessment.dimensions.ambiguity.get(), 1);
+    }
+
+    #[test]
+    fn adversarial_research_requires_sol_high() {
+        let decision = route_for(
+            "investigate the most exploitable glitches and attack surface in my private test server",
+        );
+        assert_eq!(decision.task_type, TaskType::Research);
+        assert_eq!(
+            decision.recommended_family,
+            crate::routing::ModelFamily::Sol
+        );
+        assert!(decision.recommended_effort >= crate::routing::ReasoningLevel::High);
+    }
+
+    #[test]
+    fn natural_language_routing_evaluation_requires_sol_high() {
+        let decision = route_for(
+            "evaluate whether model routing is doing its job properly and explain why it feels off",
+        );
+        assert_eq!(
+            decision.recommended_family,
+            crate::routing::ModelFamily::Sol
+        );
+        assert!(decision.recommended_effort >= crate::routing::ReasoningLevel::High);
+    }
+
+    #[test]
+    fn length_alone_cannot_manufacture_high_or_max_effort() {
+        let prompt = "implement the bounded known change. ".repeat(250);
+        let decision = route_for(&prompt);
+        assert!(decision.normalized_score < 46);
+        assert_eq!(
+            decision.recommended_family,
+            crate::routing::ModelFamily::Terra
+        );
+        assert_eq!(
+            decision.recommended_effort,
+            crate::routing::ReasoningLevel::Medium
         );
     }
 }

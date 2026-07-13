@@ -13,15 +13,27 @@ use super::tuning::{CalibrationStore, RepositoryTuning, analyze_repository, load
 pub struct HistoryReport {
     pub schema_version: u32,
     pub total_decisions: u64,
+    /// All successfully launched decisions, including adaptive agent turns.
+    pub total_launched_decisions: u64,
+    pub total_agent_decisions: u64,
+    pub total_preview_decisions: u64,
+    pub total_legacy_decisions: u64,
+    /// Route distribution for all successfully launched decisions.
     pub route_distribution: BTreeMap<String, u64>,
+    pub agent_route_distribution: BTreeMap<String, u64>,
+    pub preview_route_distribution: BTreeMap<String, u64>,
+    pub legacy_route_distribution: BTreeMap<String, u64>,
     pub model_family_distribution: BTreeMap<String, u64>,
     pub effort_distribution: BTreeMap<String, u64>,
+    pub unresolved_generic_baseline_decisions: u64,
+    pub unresolved_generic_baseline_rate_basis_points: u16,
     pub average_confidence_basis_points: u16,
     pub classifier_invocation_rate_basis_points: u16,
     pub classifier_failure_rate_basis_points: u16,
     pub catalog_fallback_rate_basis_points: u16,
     pub downgrade_rate_basis_points: u16,
     pub feedback_distribution: BTreeMap<String, u64>,
+    pub feedback_source_distribution: BTreeMap<String, u64>,
     pub feedback_by_route: BTreeMap<String, BTreeMap<String, u64>>,
     pub feedback_by_repository: Vec<RepositoryTuning>,
     pub rules_most_often_raising_effort: Vec<(String, u64)>,
@@ -63,7 +75,7 @@ fn build_report_inner(path: &Path, store: CalibrationStore) -> Result<HistoryRep
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             let mut report = HistoryReport {
-                schema_version: 1,
+                schema_version: 3,
                 ..HistoryReport::default()
             };
             report.feedback_by_repository = analyze_repository(path, &store, None)?.repositories;
@@ -77,7 +89,7 @@ fn build_report_inner(path: &Path, store: CalibrationStore) -> Result<HistoryRep
         }
     };
     let mut report = HistoryReport {
-        schema_version: 1,
+        schema_version: 3,
         ..HistoryReport::default()
     };
     let mut confidence_total = 0_u64;
@@ -98,18 +110,34 @@ fn build_report_inner(path: &Path, store: CalibrationStore) -> Result<HistoryRep
         };
         match value.get("record_type").and_then(|value| value.as_str()) {
             Some("decision") => {
+                let mode = value
+                    .get("decision_mode")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned);
                 let Ok(record) = serde_json::from_value::<DecisionRecord>(value) else {
                     continue;
                 };
                 report.total_decisions += 1;
-                increment(
-                    &mut report.route_distribution,
-                    format!("{}:{}", record.selected_family, record.selected_effort),
-                );
-                decision_routes.insert(
-                    record.decision_id.clone(),
-                    format!("{}:{}", record.selected_family, record.selected_effort),
-                );
+                let route = format!("{}:{}", record.selected_family, record.selected_effort);
+                decision_routes.insert(record.decision_id.clone(), route.clone());
+                if mode.as_deref() == Some("preview") {
+                    report.total_preview_decisions += 1;
+                    increment(&mut report.preview_route_distribution, route);
+                    continue;
+                }
+                if !matches!(mode.as_deref(), Some("launched" | "agent")) {
+                    // Records created before decision_mode existed cannot distinguish real
+                    // launches from the previews that older cauto versions also persisted.
+                    report.total_legacy_decisions += 1;
+                    increment(&mut report.legacy_route_distribution, route);
+                    continue;
+                }
+                report.total_launched_decisions += 1;
+                if mode.as_deref() == Some("agent") {
+                    report.total_agent_decisions += 1;
+                    increment(&mut report.agent_route_distribution, route.clone());
+                }
+                increment(&mut report.route_distribution, route);
                 increment(
                     &mut report.model_family_distribution,
                     record.selected_family.to_string(),
@@ -117,6 +145,11 @@ fn build_report_inner(path: &Path, store: CalibrationStore) -> Result<HistoryRep
                 increment(
                     &mut report.effort_distribution,
                     record.selected_effort.to_string(),
+                );
+                report.unresolved_generic_baseline_decisions += u64::from(
+                    record.matched_rule_ids.is_empty()
+                        && record.dimensions == crate::routing::DimensionScores::default()
+                        && (!record.classifier_ran || record.classifier_outcome != "success"),
                 );
                 confidence_total += u64::from(record.confidence_basis_points);
                 classifier_runs += u64::from(record.classifier_ran);
@@ -127,16 +160,21 @@ fn build_report_inner(path: &Path, store: CalibrationStore) -> Result<HistoryRep
                     crate::routing::CapabilitySource::Fallback
                 ));
                 downgrades += u64::from(record.downgrade.is_some());
-                for rule in record.raising_rule_ids {
-                    increment(&mut raising, rule);
+                for rule in &record.raising_rule_ids {
+                    increment(&mut raising, rule.clone());
                 }
-                for rule in record.lowering_rule_ids {
-                    increment(&mut lowering, rule);
+                for rule in &record.lowering_rule_ids {
+                    increment(&mut lowering, rule.clone());
                 }
             }
             Some("feedback") => {
                 if let Some(feedback) = value.get("feedback").and_then(|value| value.as_str()) {
                     increment(&mut report.feedback_distribution, feedback);
+                    let source = value
+                        .get("source")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("legacy-unspecified");
+                    increment(&mut report.feedback_source_distribution, source);
                     if let Some(route) = value
                         .get("decision_id")
                         .and_then(|value| value.as_str())
@@ -153,13 +191,18 @@ fn build_report_inner(path: &Path, store: CalibrationStore) -> Result<HistoryRep
         }
     }
     report.average_confidence_basis_points = confidence_total
-        .checked_div(report.total_decisions)
+        .checked_div(report.total_launched_decisions)
         .unwrap_or(0)
         .min(10_000) as u16;
-    report.classifier_invocation_rate_basis_points = rate(classifier_runs, report.total_decisions);
+    report.classifier_invocation_rate_basis_points =
+        rate(classifier_runs, report.total_launched_decisions);
     report.classifier_failure_rate_basis_points = rate(classifier_failures, classifier_runs);
-    report.catalog_fallback_rate_basis_points = rate(fallbacks, report.total_decisions);
-    report.downgrade_rate_basis_points = rate(downgrades, report.total_decisions);
+    report.catalog_fallback_rate_basis_points = rate(fallbacks, report.total_launched_decisions);
+    report.downgrade_rate_basis_points = rate(downgrades, report.total_launched_decisions);
+    report.unresolved_generic_baseline_rate_basis_points = rate(
+        report.unresolved_generic_baseline_decisions,
+        report.total_launched_decisions,
+    );
     report.rules_most_often_raising_effort = top_rules(raising);
     report.rules_most_often_lowering_effort = top_rules(lowering);
     report.feedback_by_repository = analyze_repository(path, &store, None)?.repositories;

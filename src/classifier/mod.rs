@@ -4,45 +4,39 @@ pub mod prompt;
 pub mod runner;
 pub mod schema;
 
-use crate::routing::{BoundedScore, DimensionScores};
+use crate::routing::DimensionScores;
 
 pub use prompt::build_classifier_prompt;
 pub use runner::{ClassifierError, ClassifierRun, should_run};
 pub use schema::ClassifierAssessment;
 
-fn blend(left: BoundedScore, right: BoundedScore) -> BoundedScore {
-    let value = (u16::from(left.get()) * 7 + u16::from(right.get()) * 3 + 5) / 10;
-    BoundedScore::new(value as u8).expect("weighted bounded scores remain bounded")
-}
-
-/// Blends classifier evidence at 30%, retaining deterministic policy as the majority.
+/// Adds semantic classifier evidence without weakening deterministic policy evidence.
+///
+/// The classifier only runs across an explicit isolation boundary. Treating its output as a
+/// monotonic supplement lets it recognize risk expressed in unfamiliar natural language while
+/// preserving every deterministic rule and feature floor.
 #[must_use]
 pub fn blend_dimensions(
     deterministic: DimensionScores,
     classifier: &ClassifierAssessment,
 ) -> DimensionScores {
     DimensionScores {
-        scope: blend(deterministic.scope, classifier.scope),
-        ambiguity: blend(deterministic.ambiguity, classifier.ambiguity),
-        cost_of_being_wrong: blend(
-            deterministic.cost_of_being_wrong,
-            classifier.cost_of_being_wrong,
-        ),
-        runtime_dependence: blend(
-            deterministic.runtime_dependence,
-            classifier.runtime_dependence,
-        ),
-        architectural_depth: blend(
-            deterministic.architectural_depth,
-            classifier.architectural_depth,
-        ),
-        verification_burden: blend(
-            deterministic.verification_burden,
-            classifier.verification_burden,
-        ),
-        parallelizability: blend(
-            deterministic.parallelizability,
-            classifier.parallelizability,
-        ),
+        scope: deterministic.scope.max(classifier.scope),
+        ambiguity: deterministic.ambiguity.max(classifier.ambiguity),
+        cost_of_being_wrong: deterministic
+            .cost_of_being_wrong
+            .max(classifier.cost_of_being_wrong),
+        runtime_dependence: deterministic
+            .runtime_dependence
+            .max(classifier.runtime_dependence),
+        architectural_depth: deterministic
+            .architectural_depth
+            .max(classifier.architectural_depth),
+        verification_burden: deterministic
+            .verification_burden
+            .max(classifier.verification_burden),
+        parallelizability: deterministic
+            .parallelizability
+            .max(classifier.parallelizability),
     }
 }

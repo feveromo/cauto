@@ -106,6 +106,19 @@ fn hysteresis_keeps_prior_effort_inside_boundary_band() {
 }
 
 #[test]
+fn zero_margin_disables_cross_task_hysteresis() {
+    let safe = dimensions([1, 0, 1, 0, 1, 2, 0]);
+    assert_eq!(
+        family_with_hysteresis(safe, 19, Some(ModelFamily::Terra), 0),
+        ModelFamily::Luna
+    );
+    assert_eq!(
+        effort_with_hysteresis(19, Some(ReasoningLevel::Medium), 0),
+        ReasoningLevel::Low
+    );
+}
+
+#[test]
 fn family_hysteresis_respects_boundary_and_risk_guards() {
     let safe = dimensions([1, 1, 1, 1, 1, 1, 0]);
     assert_eq!(

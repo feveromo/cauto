@@ -18,6 +18,25 @@ fn help_and_version_are_fast_paths() {
 }
 
 #[test]
+fn adaptive_agent_has_a_resume_surface_and_rejects_json_mode() {
+    common::cauto_command(tempdir().unwrap().path())
+        .args(["agent", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--resume"))
+        .stdout(predicate::str::contains("--dry-run").not())
+        .stdout(predicate::str::contains("--print-command").not())
+        .stdout(predicate::str::contains("--run-classifier").not());
+    common::cauto_command(tempdir().unwrap().path())
+        .args(["--json", "agent"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains(
+            "--json is not supported by the native TUI agent mode",
+        ));
+}
+
+#[test]
 fn empty_noninteractive_prompt_is_rejected() {
     common::cauto_command(tempdir().unwrap().path())
         .arg("--dry-run")
@@ -113,6 +132,42 @@ fn preview_classifier_can_be_explicitly_requested() {
 
     let invocations = std::fs::read_to_string(&invocation_log).unwrap();
     assert!(invocations.lines().any(|line| line.starts_with("exec ")));
+}
+
+#[test]
+fn default_auto_classifier_only_targets_deterministic_semantic_gaps() {
+    let home = tempdir().unwrap();
+    let codex = common::fake_codex(home.path());
+
+    common::cauto_command(home.path())
+        .args([
+            "--codex-bin",
+            codex.to_str().unwrap(),
+            "--dry-run",
+            "--prompt",
+            "how do these project widgets work in here",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Classifier: would run"));
+
+    for recognized in [
+        "the desktop service wont launch pls fix",
+        "reverse engineer this protocol boundary",
+        "fix typo in README.md and prove that it renders",
+    ] {
+        common::cauto_command(home.path())
+            .args([
+                "--codex-bin",
+                codex.to_str().unwrap(),
+                "--dry-run",
+                "--prompt",
+                recognized,
+            ])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("Classifier: would run").not());
+    }
 }
 
 #[test]

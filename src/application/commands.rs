@@ -232,23 +232,55 @@ pub(super) fn run_report(global: &GlobalArgs) -> Result<ExitCode, AppError> {
                 .map_err(|error| AppError::Serialization(error.to_string()))?
         );
     } else {
-        println!("Decisions: {}", report.total_decisions);
         println!(
-            "Average confidence: {}%",
+            "Decisions: {} total ({} launched, including {} adaptive-agent turns; {} preview; {} legacy/untyped)",
+            report.total_decisions,
+            report.total_launched_decisions,
+            report.total_agent_decisions,
+            report.total_preview_decisions,
+            report.total_legacy_decisions,
+        );
+        println!(
+            "Average confidence (launched): {}%",
             (u32::from(report.average_confidence_basis_points) + 50) / 100
         );
         println!(
-            "Classifier invocation/failure: {}% / {}%",
+            "Classifier invocation/failure (launched): {}% / {}%",
             report.classifier_invocation_rate_basis_points / 100,
             report.classifier_failure_rate_basis_points / 100
         );
         println!(
-            "Catalog fallback/downgrade: {}% / {}%",
+            "Catalog fallback/downgrade (launched): {}% / {}%",
             report.catalog_fallback_rate_basis_points / 100,
             report.downgrade_rate_basis_points / 100
         );
-        println!("Routes: {:?}", report.route_distribution);
+        println!("Routes (launched): {:?}", report.route_distribution);
+        if !report.agent_route_distribution.is_empty() {
+            println!(
+                "Routes (adaptive agent): {:?}",
+                report.agent_route_distribution
+            );
+        }
+        if !report.preview_route_distribution.is_empty() {
+            println!("Routes (preview): {:?}", report.preview_route_distribution);
+        }
+        if !report.legacy_route_distribution.is_empty() {
+            println!(
+                "Routes (legacy/untyped): {:?}",
+                report.legacy_route_distribution
+            );
+        }
+        println!(
+            "Unresolved generic baseline: {} / {} launched decisions ({}%)",
+            report.unresolved_generic_baseline_decisions,
+            report.total_launched_decisions,
+            report.unresolved_generic_baseline_rate_basis_points / 100,
+        );
         println!("Feedback: {:?}", report.feedback_distribution);
+        println!(
+            "Feedback sources: {:?}",
+            report.feedback_source_distribution
+        );
         println!("Feedback by route: {:?}", report.feedback_by_route);
         println!("Feedback by repository:");
         for repository in &report.feedback_by_repository {

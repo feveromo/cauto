@@ -170,9 +170,9 @@ pub struct ValidatedConfig {
 impl Default for ValidatedConfig {
     fn default() -> Self {
         Self {
-            // A classifier is an additional native Codex task. Keep routing deterministic
-            // until a user explicitly opts into that extra quota and latency.
-            classifier: ClassifierMode::Never,
+            // Use Luna only when the deterministic path has no semantic evidence. Recognized
+            // tasks remain on the zero-subprocess fast path, and --no-classifier is a hard opt-out.
+            classifier: ClassifierMode::Auto,
             classifier_confidence_threshold_basis_points: 7_200,
             default_model: "gpt-5.6-sol".into(),
             default_effort: ReasoningLevel::Medium,
@@ -184,7 +184,9 @@ impl Default for ValidatedConfig {
             git_timeout: TimeoutMillis::new(250).expect("non-zero default"),
             catalog_timeout: TimeoutMillis::new(2_500).expect("non-zero default"),
             classifier_timeout: TimeoutMillis::new(45_000).expect("non-zero default"),
-            hysteresis_points: 2,
+            // Separate one-shot launcher invocations are separate tasks. Cross-turn hysteresis
+            // belongs in the future thread-aware agent, not repository-global history.
+            hysteresis_points: 0,
             weights: Weights::default(),
             rules: Vec::new(),
         }

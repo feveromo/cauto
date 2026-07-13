@@ -24,14 +24,14 @@ pub(super) struct DecisionLogInput<'a> {
     pub policy: InjectionPolicy,
     pub classifier_ran: bool,
     pub classifier_outcome: &'a str,
-    pub preview: bool,
+    pub decision_mode: &'a str,
     pub strict: bool,
     pub quiet: bool,
 }
 
-pub(super) fn write(input: DecisionLogInput<'_>) -> Result<(), AppError> {
+pub(super) fn write(input: DecisionLogInput<'_>) -> Result<Option<String>, AppError> {
     if std::env::var_os("CAUTO_DISABLE_LOG").is_some() {
-        return Ok(());
+        return Ok(None);
     }
     let empty = OsString::new();
     let prompt_os = input.prompt.original.as_deref().unwrap_or(&empty);
@@ -88,8 +88,8 @@ pub(super) fn write(input: DecisionLogInput<'_>) -> Result<(), AppError> {
     let record = DecisionRecord {
         schema_version: 1,
         record_type: "decision".into(),
-        decision_mode: if input.preview { "preview" } else { "launched" }.into(),
-        decision_id,
+        decision_mode: input.decision_mode.into(),
+        decision_id: decision_id.clone(),
         timestamp,
         cauto_version: env!("CARGO_PKG_VERSION").into(),
         codex_version: input.catalog.codex_version.clone(),
@@ -125,13 +125,13 @@ pub(super) fn write(input: DecisionLogInput<'_>) -> Result<(), AppError> {
         feedback: None,
     };
     match append_decision(&input.paths.decisions(), &record) {
-        Ok(()) => Ok(()),
+        Ok(()) => Ok(Some(decision_id)),
         Err(error) if input.strict => Err(error),
         Err(error) => {
             if !input.quiet {
                 eprintln!("cauto: warning: decision logging failed: {error}");
             }
-            Ok(())
+            Ok(None)
         }
     }
 }

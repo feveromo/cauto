@@ -443,7 +443,7 @@ pub fn into_validated(raw: RawConfig, file: &Path) -> Result<ValidatedConfig, Ap
             raw.classifier_timeout_seconds.unwrap_or(45) * 1_000,
         )
         .expect("validated non-zero timeout"),
-        hysteresis_points: raw.hysteresis_points.unwrap_or(2),
+        hysteresis_points: raw.hysteresis_points.unwrap_or(0),
         weights,
         rules,
     })

@@ -16,6 +16,14 @@ pub enum FeedbackKind {
     FailedForOtherReason,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FeedbackSource {
+    Manual,
+    ImplicitCorrection,
+    ExplicitRouteChange,
+}
+
 impl FromStr for FeedbackKind {
     type Err = String;
 
@@ -38,6 +46,28 @@ struct FeedbackRecord<'a> {
     decision_id: &'a str,
     repository_identifier: &'a str,
     feedback: FeedbackKind,
+    source: FeedbackSource,
+}
+
+pub fn append_feedback_for_decision(
+    path: &Path,
+    decision_id: &str,
+    repository_id: &str,
+    feedback: FeedbackKind,
+    source: FeedbackSource,
+) -> Result<(), AppError> {
+    let event = FeedbackRecord {
+        schema_version: 2,
+        record_type: "feedback",
+        timestamp: timestamp_now(),
+        decision_id,
+        repository_identifier: repository_id,
+        feedback,
+        source,
+    };
+    let event_bytes =
+        serde_json::to_vec(&event).map_err(|error| AppError::Serialization(error.to_string()))?;
+    append_json_line(path, &event_bytes)
 }
 
 pub fn append_feedback(
@@ -61,16 +91,12 @@ pub fn append_feedback(
                 "no prior cauto decision exists for the current repository".into(),
             )
         })?;
-    let event = FeedbackRecord {
-        schema_version: 1,
-        record_type: "feedback",
-        timestamp: timestamp_now(),
-        decision_id: &recent.decision_id,
-        repository_identifier: repository_id,
+    append_feedback_for_decision(
+        path,
+        &recent.decision_id,
+        repository_id,
         feedback,
-    };
-    let event_bytes =
-        serde_json::to_vec(&event).map_err(|error| AppError::Serialization(error.to_string()))?;
-    append_json_line(path, &event_bytes)?;
+        FeedbackSource::Manual,
+    )?;
     Ok(recent.decision_id)
 }

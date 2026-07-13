@@ -4,6 +4,8 @@
 //! Repository-aware routing and native launch support for the Codex CLI.
 
 #[doc(hidden)]
+pub mod app_server;
+#[doc(hidden)]
 pub mod application;
 #[doc(hidden)]
 pub mod cache;

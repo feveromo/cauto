@@ -7,20 +7,21 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-4c1?logo=opensourceinitiative&logoColor=white)](LICENSE)
 [![Native Codex launcher](https://img.shields.io/badge/launches-native%20Codex-101828?logo=openai&logoColor=white)](https://github.com/openai/codex)
 
-`cauto` is a fast, repository-aware launcher for the native OpenAI Codex CLI.
-It scores a task, selects the lowest capable installed model and reasoning
-effort, explains the choice, records a redacted decision, and then replaces
-itself with the real `codex` process on Unix.
+`cauto` is a fast, repository-aware router for the native OpenAI Codex CLI. It
+scores a task, selects the lowest capable installed model and reasoning effort,
+explains the choice, and records a redacted decision. Its adaptive agent mode
+does that before every turn in a native Codex TUI, without requiring manual
+feedback or tuning commands.
 
 ```text
-your task ──> cauto scores the work ──> picks a capable route ──> native codex
+each turn ──> cauto scores the work ──> picks a capable route ──> native codex
 ```
 
-It is a transparent launcher. It reuses the native CLI's existing ChatGPT
-authentication, subscription allowance, config, profiles, MCP servers, rules,
-skills, permissions, sandbox, and terminal behavior. It is not an API proxy,
-alternate TUI, provider bridge, or billing layer, and it never configures an API
-key.
+It reuses the native CLI's existing ChatGPT authentication, subscription
+allowance, config, profiles, MCP servers, rules, skills, permissions, sandbox,
+and terminal behavior. `cauto agent` is a loopback-only transparent App Server
+transport in front of the native TUI, not an alternate TUI, provider bridge,
+billing layer, or OpenAI API client. It never configures an API key.
 
 ## Why cauto?
 
@@ -28,8 +29,11 @@ key.
   ambiguous, or architectural work gets the headroom it needs.
 - **Keep Codex native.** Your existing authentication, profiles, rules, MCP
   servers, skills, permissions, and terminal flow remain the source of truth.
-- **See and control every decision.** Preview routes, set explicit overrides,
-  and retain only redacted decision records—never raw prompts.
+- **Adapt without a feedback chore.** Clear corrections and explicit route
+  changes become bounded signals automatically; weak proxies such as prompt
+  length, tool count, or session duration do not.
+- **See and control every decision.** Route transitions remain visible, preview
+  tools still work, and history contains redacted records—never raw prompts.
 
 ## Install
 
@@ -53,15 +57,25 @@ pulling the repository and rerunning the installer. Uninstall with
 ## Daily Use
 
 ```bash
-cauto "diagnose the intermittent lifecycle bug and live-validate the fix"
+cauto agent
+cauto agent "diagnose the intermittent lifecycle bug and live-validate the fix"
+cauto agent --resume THREAD_ID
 cauto exec "run a bounded non-interactive implementation task"
 cauto explain "reverse engineer this packet handler"
 cauto --dry-run "fix a typo in README.md"
 ```
 
-An interactive invocation without a prompt opens native Codex using the
-configured default route. A non-interactive invocation without an explicit
-prompt source fails instead of classifying an empty string as cheap work.
+`cauto agent` is the recommended interactive path. It starts the real Codex TUI
+through a local transparent transport, routes every text turn, keeps approvals,
+tools, streaming, interruption, and thread storage native, and shuts down its
+App Server child when the TUI exits. `--resume` restores a native Codex thread
+and seeds cauto's same-thread route state from the server.
+
+The original `cauto "task"` form remains a one-shot launcher: it routes the
+opening task and then replaces itself with native Codex on Unix. Use it when
+per-turn adaptation is not needed. An invocation without an explicit prompt
+source fails in non-interactive preview/exec modes instead of classifying an
+empty string as cheap work.
 
 Prompt sources are positional text, `--prompt`, `--prompt-file`, or `--stdin`.
 Use exactly one. Native arguments require `--`, so boundaries are unambiguous:
@@ -72,6 +86,11 @@ cauto --prompt-file task.txt -- --image "screen one.png" --image screen-two.png
 ```
 
 Everything after `--` is forwarded as the original `OsString` sequence.
+The same delimiter works with agent mode:
+
+```bash
+cauto agent "inspect the live page" -- --search
+```
 
 ## Overrides
 
@@ -112,8 +131,8 @@ weights remain user- or CLI-owned. Example user configuration:
 
 ```toml
 version = 1
-# Optional extra native Codex task; opt in per task with --classifier auto/always.
-classifier = "never"
+# "auto" uses Luna/Low only for low-confidence tasks with no deterministic semantic evidence.
+classifier = "auto"
 classifier_confidence_threshold = 0.72
 default_model = "gpt-5.6-sol"
 default_effort = "medium"
@@ -125,6 +144,7 @@ catalog_cache_hours = 12
 git_timeout_ms = 250
 catalog_timeout_ms = 2500
 classifier_timeout_seconds = 45
+hysteresis_points = 0
 
 [weights]
 scope = 20
@@ -155,10 +175,23 @@ runtime risk, architecture, protocols, pathing, rendering, concurrency, and
 high verification burden. Policy floors, ceilings, conflicts, explicit
 overrides, catalog support, and downgrade rules are then applied.
 
+Prompt length is only a bounded scope hint: crossing 1,200 and 5,000 bytes can
+add at most two scope levels, and length alone cannot reach High, Extra High,
+Max, or Ultra. Natural-language failure symptoms, live operational repairs,
+adversarial research, and routing-quality audits are scored from their task
+semantics rather than their length.
+
 Threshold hysteresis reads at most the last 256 KiB of redacted decision
-history and retains the previous repository effort only inside the configured
-boundary margin. Preview decisions never affect hysteresis. It never reads a
-prior raw prompt because none is stored.
+history when `hysteresis_points` is explicitly configured above zero. It is off
+by default in the one-shot launcher because separate invocations are separate
+tasks, not turns in one identified thread. Preview decisions never affect hysteresis,
+and history never contains a prior raw prompt.
+
+Adaptive agent threads use their own four-point hysteresis band regardless of
+the cross-invocation setting. A clear underpowered correction raises the next
+route by at least one family/effort step; a clear overkill correction lowers it
+by at most one step. Existing safety floors, explicit choices, installed
+capabilities, and Ultra authorization still win.
 
 `cauto models` shows the installed catalog. Add `--refresh`, `--bundled`,
 `--include-hidden`, or `--json`. `cauto doctor` reports the resolved binary,
@@ -167,10 +200,11 @@ actual Max/Ultra support without printing secrets.
 
 ## Classifier
 
-The deterministic route runs first. The optional Luna classifier is disabled by
-default because it launches an extra native Codex task. Opt in for uncertain
-tasks with `--classifier auto`, or force it with `--classifier always`.
-`--no-classifier`, `--classifier never`, and `--offline` disable it.
+The deterministic route runs first. By default, the Luna classifier runs only
+for a low-confidence task that has no deterministic semantic feature, signal,
+or matched policy rule. Recognized tasks stay on the fast path with no extra
+subprocess. Force classification with `--classifier always`; disable it with
+`--no-classifier`, `--classifier never`, or `--offline`.
 
 `--dry-run` and `explain` report when the classifier would run but do not start
 it. Pass `--run-classifier` with a preview only when that extra native Codex
@@ -180,7 +214,9 @@ The classifier uses native `codex exec` and saved authentication in a private
 temporary directory, read-only sandbox, low effort, strict JSON schema, and a
 separate timed process group. It receives bounded metadata, not file contents
 or environment data. Failures fall back to deterministic routing. It can never
-authorize Ultra or weaken explicit project safety floors.
+authorize Ultra or weaken deterministic or project safety floors. Its semantic
+evidence can raise dimensions that exact phrase matching missed, but cannot
+lower deterministic evidence.
 
 ## Privacy And History
 
@@ -191,38 +227,49 @@ sanitized argv with the prompt removed. Unknown `-c` values are redacted.
 Cache/state directories and files use user-only permissions where supported.
 
 ```bash
+cauto report
+```
+
+In agent mode, explicit native model/effort changes and clear conversational
+corrections such as "still broken" or "that was overkill" are recorded as
+feedback automatically. A repository needs at least three eligible signals and
+70% agreement before cauto automatically applies a bounded +5 or -5 score-point
+calibration. Two consecutive failed turns temporarily raise the next attempt,
+but failures never alter persistent calibration.
+
+Silence is not treated as approval. Prompt length, elapsed time, token use, and
+tool count are not treated as outcome evidence. `cauto report` separates
+adaptive-agent, direct launched, preview, and legacy/untyped decisions; its
+primary route distribution and health rates use all real launches. It also
+reports feedback sources and unresolved generic-baseline concentration.
+
+## Automatic Adaptation And Optional Manual Controls
+
+Routine agent use does not require `cauto feedback` or `cauto tune`. The old
+commands remain available for compatibility, diagnostics, and deliberate
+manual input:
+
+```bash
 cauto feedback right
 cauto feedback overkill
 cauto feedback underpowered
 cauto feedback failed-for-other-reason
-cauto report
+cauto tune
+cauto tune --apply
 ```
 
-Feedback never changes routing in the background; only `cauto tune --apply`
-can persist a calibration.
-
-## Feedback-Driven Tuning
-
-Tuning is repository-specific, bounded, and always opt-in. The normal workflow
-is:
-
-1. Work normally and let real sessions produce launched decisions.
-2. Submit `right`, `underpowered`, `overkill`, or diagnostic
-   `failed-for-other-reason` feedback after those sessions.
-3. Inspect the read-only recommendation with `cauto tune` (or `--json`).
-4. Run `cauto tune --apply` only when its explanation looks right.
-
-A repository needs at least three non-preview routing feedback events, and at
-least 70% must point to `underpowered` or `overkill`. `right` counts against a
-change; `failed-for-other-reason` is displayed but cannot affect routing.
-Eligible feedback proposes only a +5 or -5 score-point calibration. Preview
+`cauto tune` is still a read-only inspection unless `--apply` is supplied.
+Agent-generated corrections use the same conservative threshold and apply an
+eligible recommendation automatically. `right` counts against a change;
+`failed-for-other-reason` is displayed but cannot affect routing. Preview
 decisions and feedback attached to previews are excluded.
 
 Applied values live separately from config and policy in
 `~/.local/state/cauto/calibration.json`. The versioned file contains repository
 identifiers and aggregate counts, never prompts. Writes are atomic and private.
 Use `cauto tune --reset` to remove only the current (or `--repo PATH` selected)
-repository's calibration.
+repository's calibration. A later eligible agent signal may establish a new
+bounded calibration.
 
 Calibration is applied after deterministic feature and rule scoring and before
 family/effort selection and hysteresis. Route output shows the configured and

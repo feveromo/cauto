@@ -1,6 +1,6 @@
 use serde::Deserialize;
 
-use crate::routing::{BoundedScore, Confidence, EscalationSignal, Reason};
+use crate::routing::{BoundedScore, Confidence, EscalationSignal, Reason, TaskType};
 
 const MAX_REASONS: usize = 12;
 const MAX_SIGNALS: usize = 12;
@@ -8,7 +8,7 @@ const MAX_STRING_BYTES: usize = 512;
 
 #[derive(Clone, Debug)]
 pub struct ClassifierAssessment {
-    pub task_type: String,
+    pub task_type: TaskType,
     pub scope: BoundedScore,
     pub ambiguity: BoundedScore,
     pub cost_of_being_wrong: BoundedScore,
@@ -23,7 +23,7 @@ pub struct ClassifierAssessment {
 
 #[derive(Debug, Deserialize)]
 struct RawClassifierAssessment {
-    task_type: String,
+    task_type: TaskType,
     scope: u8,
     ambiguity: u8,
     cost_of_being_wrong: u8,
@@ -42,9 +42,6 @@ impl ClassifierAssessment {
     pub fn parse(bytes: &[u8]) -> Result<Self, String> {
         let raw: RawClassifierAssessment =
             serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
-        if raw.task_type.is_empty() || raw.task_type.len() > 128 {
-            return Err("task_type must contain 1..=128 bytes".into());
-        }
         if raw.reasons.len() > MAX_REASONS {
             return Err(format!("reasons exceeds the {MAX_REASONS}-item limit"));
         }
@@ -101,7 +98,13 @@ pub fn output_schema() -> serde_json::Value {
             "parallelizability", "confidence", "reasons", "escalation_signals"
         ],
         "properties": {
-            "task_type": {"type": "string", "minLength": 1, "maxLength": 128},
+            "task_type": {
+                "type": "string",
+                "enum": [
+                    "documentation", "mechanical", "coding", "diagnosis",
+                    "architecture", "research", "review"
+                ]
+            },
             "scope": {"type": "integer", "minimum": 0, "maximum": 4},
             "ambiguity": {"type": "integer", "minimum": 0, "maximum": 4},
             "cost_of_being_wrong": {"type": "integer", "minimum": 0, "maximum": 4},

@@ -2,9 +2,11 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use cauto::classifier::runner;
-use cauto::classifier::{ClassifierAssessment, should_run};
+use cauto::classifier::{ClassifierAssessment, blend_dimensions, should_run};
 use cauto::codex::binary::CodexInstallation;
-use cauto::routing::{ClassifierMode, Confidence};
+use cauto::routing::{
+    BoundedScore, ClassifierMode, Confidence, DimensionScores, TaskType, Weights, normalized_score,
+};
 use tempfile::tempdir;
 
 #[cfg(unix)]
@@ -49,6 +51,7 @@ fn classifier_output_is_strictly_bounded() {
     }"#;
     let parsed = ClassifierAssessment::parse(valid).unwrap();
     assert_eq!(parsed.scope.get(), 2);
+    assert_eq!(parsed.task_type, TaskType::Coding);
     assert_eq!(parsed.confidence.basis_points(), 7_500);
 
     let invalid = valid.to_vec();
@@ -57,6 +60,42 @@ fn classifier_output_is_strictly_bounded() {
         .replace("\"scope\":2", "\"scope\":5");
     assert!(ClassifierAssessment::parse(text.as_bytes()).is_err());
     assert!(ClassifierAssessment::parse(b"not json").is_err());
+}
+
+#[test]
+fn classifier_can_add_semantic_risk_but_cannot_erase_deterministic_evidence() {
+    let assessment = ClassifierAssessment::parse(
+        br#"{
+          "task_type":"diagnosis",
+          "scope":2,
+          "ambiguity":3,
+          "cost_of_being_wrong":3,
+          "runtime_dependence":3,
+          "architectural_depth":1,
+          "verification_burden":3,
+          "parallelizability":0,
+          "confidence":0.9,
+          "reasons":["live failure"],
+          "escalation_signals":[]
+        }"#,
+    )
+    .unwrap();
+    let merged = blend_dimensions(DimensionScores::default(), &assessment);
+    assert!(normalized_score(merged, Weights::default()) >= 46);
+    assert_eq!(merged.runtime_dependence.get(), 3);
+
+    let four = BoundedScore::new(4).unwrap();
+    let deterministic = DimensionScores {
+        scope: four,
+        ambiguity: four,
+        cost_of_being_wrong: four,
+        runtime_dependence: four,
+        architectural_depth: four,
+        verification_burden: four,
+        parallelizability: four,
+    };
+    let merged = blend_dimensions(deterministic, &assessment);
+    assert_eq!(merged, deterministic);
 }
 
 #[test]

@@ -4,6 +4,7 @@ use crate::routing::{CalibrationEffect, Downgrade, LaunchMode, RouteDecision, Ro
 
 #[derive(Serialize)]
 struct JsonDecision<'a> {
+    task_type: &'a crate::routing::TaskType,
     model: &'a str,
     family: &'a crate::routing::ModelFamily,
     effort: crate::routing::ReasoningLevel,
@@ -36,6 +37,8 @@ struct JsonOutput<'a> {
     dimensions: crate::routing::DimensionScores,
     matches: &'a [crate::routing::RuleMatch],
     conflicts: &'a [crate::routing::Conflict],
+    reasons: &'a [crate::routing::Reason],
+    escalation_signals: &'a [crate::routing::EscalationSignal],
     classifier: JsonClassifier<'a>,
     launch: JsonLaunch<'a>,
 }
@@ -52,6 +55,7 @@ pub fn render(
     serde_json::to_string_pretty(&JsonOutput {
         schema_version: 1,
         decision: JsonDecision {
+            task_type: &decision.task_type,
             model: &preset.model_id,
             family: &preset.model_family,
             effort: preset.display_level,
@@ -66,6 +70,8 @@ pub fn render(
         dimensions: decision.dimensions,
         matches: &decision.matched_rules,
         conflicts: &decision.conflicts,
+        reasons: &decision.reasons,
+        escalation_signals: &decision.escalation_signals,
         classifier: JsonClassifier {
             ran: classifier_ran,
             outcome: classifier_outcome,

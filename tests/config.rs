@@ -4,6 +4,13 @@ use proptest::prelude::*;
 use tempfile::tempdir;
 
 #[test]
+fn default_config_is_hands_off_without_cross_task_hysteresis() {
+    let defaults = cauto::config::ValidatedConfig::default();
+    assert_eq!(defaults.classifier, ClassifierMode::Auto);
+    assert_eq!(defaults.hysteresis_points, 0);
+}
+
+#[test]
 fn project_overrides_user_rules_but_not_user_controls() {
     let root = tempdir().unwrap();
     let user = root.path().join("user.toml");

@@ -1,5 +1,6 @@
 //! Application orchestration split by command responsibility.
 
+mod agent;
 mod commands;
 mod decision;
 mod prompt;
@@ -24,6 +25,7 @@ use crate::routing::LaunchMode;
 pub fn run(cli: Cli) -> Result<ExitCode, AppError> {
     match cli.command {
         None => route::run_route(&cli.global, cli.route, LaunchMode::Interactive, false),
+        Some(Commands::Agent(args)) => agent::run(&cli.global, args),
         Some(Commands::Exec(args)) => route::run_route(
             &cli.global,
             merge_route_args(&cli.route, args)?,
