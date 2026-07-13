@@ -16,7 +16,7 @@ use crate::state::{
 };
 
 use super::decision::{DecisionLogInput, write as write_decision};
-use super::route::{OutcomeBias, ResolvedRoute, SessionRouteContext, resolve_route};
+use super::route::{ResolvedRoute, resolve_route};
 use super::{load_context_and_config, resolve_installation};
 
 #[derive(Clone, Debug, Default)]
@@ -27,13 +27,15 @@ struct ExplicitRoute {
 
 #[derive(Clone, Debug, Default)]
 struct ThreadState {
+    route_initialized: bool,
     family: Option<ModelFamily>,
     effort: Option<ReasoningLevel>,
     model: Option<String>,
+    native_effort: Option<String>,
+    service_tier: Option<String>,
     decision_id: Option<String>,
     repository_id: Option<String>,
     repository_name: Option<String>,
-    consecutive_failed_turns: u8,
     next_explicit_route: Option<ExplicitRoute>,
     feedback_recorded_for_decision: bool,
 }
@@ -84,7 +86,7 @@ fn contains_any(text: &str, phrases: &[&str]) -> bool {
     phrases.iter().any(|phrase| text.contains(phrase))
 }
 
-fn implicit_bias(prompt: &str) -> Option<OutcomeBias> {
+fn implicit_feedback(prompt: &str) -> Option<FeedbackKind> {
     let text = prompt.to_ascii_lowercase();
     if contains_any(
         &text,
@@ -109,7 +111,7 @@ fn implicit_bias(prompt: &str) -> Option<OutcomeBias> {
         ],
     ) || text.trim_start().starts_with("no,")
     {
-        Some(OutcomeBias::Underpowered)
+        Some(FeedbackKind::Underpowered)
     } else if contains_any(
         &text,
         &[
@@ -122,7 +124,7 @@ fn implicit_bias(prompt: &str) -> Option<OutcomeBias> {
             "use a simpler approach",
         ],
     ) {
-        Some(OutcomeBias::Overkill)
+        Some(FeedbackKind::Overkill)
     } else {
         None
     }
@@ -276,13 +278,36 @@ impl AgentRouter {
             )]);
         }
         let state = self.threads.entry(thread_id.to_owned()).or_default();
-        let feedback = feedback_for_route_change(
-            state.family.as_ref(),
-            state.effort,
-            explicit.model.as_deref(),
-            explicit.effort,
-        );
-        state.next_explicit_route = Some(explicit);
+        let feedback = (state.route_initialized
+            && state.decision_id.is_some()
+            && !state.feedback_recorded_for_decision)
+            .then(|| {
+                feedback_for_route_change(
+                    state.family.as_ref(),
+                    state.effort,
+                    explicit.model.as_deref(),
+                    explicit.effort,
+                )
+            })
+            .flatten();
+        if state.route_initialized {
+            if let Some(model) = &explicit.model {
+                state.family = Some(ModelFamily::from_model_id(model));
+                state.model = Some(model.clone());
+            }
+            if let Some(effort) = explicit.effort {
+                state.effort = Some(effort);
+                state.native_effort = Some(effort.native_name().into());
+            }
+            if params.get("serviceTier").is_some() {
+                state.service_tier = params
+                    .get("serviceTier")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+            }
+        } else {
+            state.next_explicit_route = Some(explicit);
+        }
         let Some(feedback) = feedback else {
             return Ok(Vec::new());
         };
@@ -315,20 +340,13 @@ impl AgentRouter {
         Ok(messages)
     }
 
-    fn route_turn(
+    fn route_initial_turn(
         &mut self,
         request: &mut Value,
         thread_id: &str,
         prompt: String,
     ) -> Result<Vec<Value>, AppError> {
         let state = self.threads.entry(thread_id.to_owned()).or_default();
-        let prompt_bias = implicit_bias(&prompt);
-        let repeated_failure_bias = prompt_bias.is_none() && state.consecutive_failed_turns >= 2;
-        let mut bias = prompt_bias;
-        if repeated_failure_bias {
-            bias = Some(OutcomeBias::Underpowered);
-        }
-
         let mut turn_args = self.base_args.clone();
         turn_args.task = Some(OsString::from(&prompt));
         turn_args.prompt = None;
@@ -336,18 +354,7 @@ impl AgentRouter {
         turn_args.stdin = false;
         turn_args.dry_run = false;
         turn_args.print_command = false;
-        let explicit = state.next_explicit_route.take().or_else(|| {
-            let incoming = parse_explicit_route(request.get("params").unwrap_or(&Value::Null));
-            let model_changed = incoming
-                .model
-                .as_ref()
-                .is_some_and(|model| state.model.as_ref().is_some_and(|current| current != model));
-            let effort_changed = incoming
-                .effort
-                .zip(state.effort)
-                .is_some_and(|(incoming, current)| incoming != current);
-            (state.decision_id.is_some() && (model_changed || effort_changed)).then_some(incoming)
-        });
+        let explicit = state.next_explicit_route.take();
         if self.base_args.model.is_none()
             && self.base_args.family.is_none()
             && self.native.model.is_none()
@@ -362,11 +369,6 @@ impl AgentRouter {
             turn_args.effort = Some(effort.native_name().into());
         }
 
-        let session = SessionRouteContext {
-            prior_family: state.family.clone(),
-            prior_effort: state.effort,
-            outcome_bias: bias,
-        };
         let mut turn_global = self.global.clone();
         if turn_global.repo.is_none()
             && let Some(cwd) = request
@@ -381,24 +383,8 @@ impl AgentRouter {
             &turn_args,
             LaunchMode::Interactive,
             false,
-            Some(&session),
+            true,
         )?;
-
-        let mut calibration_message = None;
-        let mut feedback_error = None;
-        if let Some(bias) = prompt_bias
-            && state.decision_id.is_some()
-        {
-            let kind = match bias {
-                OutcomeBias::Underpowered => FeedbackKind::Underpowered,
-                OutcomeBias::Overkill => FeedbackKind::Overkill,
-            };
-            let source = FeedbackSource::ImplicitCorrection;
-            match Self::record_feedback(state, &resolved.paths, kind, source) {
-                Ok(message) => calibration_message = message,
-                Err(error) => feedback_error = Some(error),
-            }
-        }
 
         let params = request
             .get_mut("params")
@@ -410,25 +396,10 @@ impl AgentRouter {
             resolved.plan.preset.native_effort.as_deref(),
             resolved.plan.preset.service_tier.as_deref(),
         );
-        let previous = state
-            .family
-            .as_ref()
-            .zip(state.effort)
-            .map(|(family, effort)| format!("{family}/{}", effort.native_name()));
         let selected = format!(
             "{}/{}",
             resolved.plan.preset.model_family,
             resolved.plan.preset.display_level.native_name()
-        );
-        let route_note = previous.map_or_else(
-            || format!("cauto routed this thread to {selected}"),
-            |previous| {
-                if previous == selected {
-                    format!("cauto kept the thread on {selected}")
-                } else {
-                    format!("cauto changed the thread route: {previous} -> {selected}")
-                }
-            },
         );
         let key = request_key(request)
             .ok_or_else(|| AppError::AppServer("turn/start request had no id".into()))?;
@@ -439,28 +410,132 @@ impl AgentRouter {
                 resolved,
             },
         );
-        let mut messages = vec![warning(Some(thread_id), route_note)];
-        if repeated_failure_bias {
-            messages.push(warning(
-                Some(thread_id),
-                "cauto escalated this turn after two failed turns; infrastructure failures do not affect persistent calibration",
-            ));
+        Ok(vec![warning(
+            Some(thread_id),
+            format!("cauto routed this session to {selected}; the route is pinned for this thread"),
+        )])
+    }
+
+    fn keep_session_route(
+        &mut self,
+        request: &mut Value,
+        thread_id: &str,
+        prompt: Option<&str>,
+    ) -> Result<Vec<Value>, AppError> {
+        let incoming_params = request.get("params").unwrap_or(&Value::Null);
+        let incoming = parse_explicit_route(incoming_params);
+        let incoming_service_tier = incoming_params
+            .get("serviceTier")
+            .map(|value| value.as_str().map(str::to_owned));
+        let state = self.threads.entry(thread_id.to_owned()).or_default();
+        let model_is_pinned = self.base_args.model.is_some()
+            || self.base_args.family.is_some()
+            || self.native.model.is_some();
+        let effort_is_pinned = self.base_args.effort.is_some() || self.native.effort_raw.is_some();
+        let service_tier_is_pinned =
+            self.base_args.fast || self.base_args.no_fast || self.native.service_tier.is_some();
+        let model_changed = !model_is_pinned
+            && incoming
+                .model
+                .as_ref()
+                .is_some_and(|model| state.model.as_ref().is_some_and(|current| current != model));
+        let effort_changed = !effort_is_pinned
+            && incoming.effort.is_some_and(|incoming| {
+                state.native_effort.as_deref().map_or_else(
+                    || state.effort.is_some_and(|current| incoming != current),
+                    |current| incoming.native_name() != current,
+                )
+            });
+        let explicit_feedback = (model_changed || effort_changed)
+            .then(|| {
+                feedback_for_route_change(
+                    state.family.as_ref(),
+                    state.effort,
+                    model_changed.then_some(incoming.model.as_deref()).flatten(),
+                    effort_changed.then_some(incoming.effort).flatten(),
+                )
+            })
+            .flatten();
+        if model_changed && let Some(model) = incoming.model {
+            state.family = Some(ModelFamily::from_model_id(&model));
+            state.model = Some(model);
         }
-        if let Some(calibration_message) = calibration_message {
-            messages.push(warning(
-                Some(thread_id),
-                format!("cauto: {calibration_message}"),
-            ));
+        if effort_changed && let Some(effort) = incoming.effort {
+            state.effort = Some(effort);
+            state.native_effort = Some(effort.native_name().to_owned());
         }
-        if let Some(error) = feedback_error {
-            messages.push(warning(
+        if !service_tier_is_pinned && let Some(service_tier) = incoming_service_tier {
+            state.service_tier = service_tier;
+        }
+        let feedback = explicit_feedback
+            .map(|kind| (kind, FeedbackSource::ExplicitRouteChange))
+            .or_else(|| {
+                prompt
+                    .and_then(implicit_feedback)
+                    .map(|kind| (kind, FeedbackSource::ImplicitCorrection))
+            });
+        let feedback_result = feedback.map(|(kind, source)| {
+            crate::paths::CautoPaths::discover()
+                .and_then(|paths| Self::record_feedback(state, &paths, kind, source))
+        });
+        let model = state.model.clone();
+        let native_effort = state
+            .native_effort
+            .clone()
+            .or_else(|| state.effort.map(|effort| effort.native_name().to_owned()));
+        let service_tier = state.service_tier.clone();
+
+        if let Some(model) = model {
+            let params = request
+                .get_mut("params")
+                .and_then(Value::as_object_mut)
+                .ok_or_else(|| {
+                    AppError::AppServer("turn/start params were not an object".into())
+                })?;
+            rewrite_turn_params(
+                params,
+                &model,
+                native_effort.as_deref(),
+                service_tier.as_deref(),
+            );
+        }
+
+        match feedback_result {
+            Some(Ok(Some(calibration))) => Ok(vec![warning(
+                Some(thread_id),
+                format!("cauto learned from this correction for future sessions; {calibration}"),
+            )]),
+            Some(Err(error)) => Ok(vec![warning(
                 Some(thread_id),
                 format!(
-                    "cauto applied the adaptive route, but automatic feedback could not be persisted: {error}"
+                    "cauto kept the pinned session route, but automatic feedback could not be persisted: {error}"
                 ),
-            ));
+            )]),
+            Some(Ok(None)) | None => Ok(Vec::new()),
         }
-        Ok(messages)
+    }
+
+    fn pin_unclassified_session(&mut self, request: &Value, thread_id: &str) -> Vec<Value> {
+        let params = request.get("params").unwrap_or(&Value::Null);
+        let incoming = parse_explicit_route(params);
+        let state = self.threads.entry(thread_id.to_owned()).or_default();
+        state.route_initialized = true;
+        if let Some(model) = incoming.model {
+            state.family = Some(ModelFamily::from_model_id(&model));
+            state.model = Some(model);
+        }
+        if let Some(effort) = incoming.effort {
+            state.effort = Some(effort);
+            state.native_effort = Some(effort.native_name().to_owned());
+        }
+        state.service_tier = params
+            .get("serviceTier")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        vec![warning(
+            Some(thread_id),
+            "cauto could not classify the initial non-text input; the native route is pinned for this thread",
+        )]
     }
 
     fn commit_turn(&mut self, key: &str, response: &Value) -> Result<Vec<Value>, AppError> {
@@ -513,9 +588,12 @@ impl AgentRouter {
             ),
         };
         let state = self.threads.entry(pending.thread_id.clone()).or_default();
+        state.route_initialized = true;
         state.family = Some(plan.preset.model_family.clone());
         state.effort = Some(plan.preset.display_level);
         state.model = Some(plan.preset.model_id);
+        state.native_effort = plan.preset.native_effort;
+        state.service_tier = plan.preset.service_tier;
         state.decision_id = decision_id;
         state.repository_id = Some(crate::state::repository_identifier(
             &context.repository.root,
@@ -523,27 +601,6 @@ impl AgentRouter {
         state.repository_name = Some(context.repository.name);
         state.feedback_recorded_for_decision = false;
         Ok(logging_warning.into_iter().collect())
-    }
-
-    fn note_completion(&mut self, message: &Value) {
-        let Some(params) = message.get("params") else {
-            return;
-        };
-        let Some(thread_id) = params.get("threadId").and_then(Value::as_str) else {
-            return;
-        };
-        let status = params
-            .get("turn")
-            .and_then(|turn| turn.get("status"))
-            .and_then(Value::as_str);
-        let state = self.threads.entry(thread_id.to_owned()).or_default();
-        match status {
-            Some("failed") => {
-                state.consecutive_failed_turns = state.consecutive_failed_turns.saturating_add(1);
-            }
-            Some("completed") => state.consecutive_failed_turns = 0,
-            Some("interrupted") | None | Some(_) => {}
-        }
     }
 
     fn note_resume_response(&mut self, thread_id: &str, message: &Value) {
@@ -559,13 +616,19 @@ impl AgentRouter {
             .and_then(Value::as_str)
             .and_then(|value| ReasoningLevel::from_str(value).ok());
         let state = self.threads.entry(thread_id.to_owned()).or_default();
+        state.route_initialized = true;
         if let Some(model) = model {
             state.family = Some(ModelFamily::from_model_id(model));
             state.model = Some(model.to_owned());
         }
         if effort.is_some() {
             state.effort = effort;
+            state.native_effort = effort.map(|value| value.native_name().to_owned());
         }
+        state.service_tier = result
+            .get("serviceTier")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
     }
 }
 
@@ -610,13 +673,18 @@ impl MessageInterceptor for AgentRouter {
         else {
             return Ok(Vec::new());
         };
-        let Some(prompt) = prompt_text(params) else {
-            return Ok(vec![warning(
-                Some(&thread_id),
-                "cauto left this turn unchanged because it contained no text input",
-            )]);
+        let prompt = prompt_text(params);
+        if self
+            .threads
+            .get(&thread_id)
+            .is_some_and(|state| state.route_initialized)
+        {
+            return self.keep_session_route(message, &thread_id, prompt.as_deref());
+        }
+        let Some(prompt) = prompt else {
+            return Ok(self.pin_unclassified_session(message, &thread_id));
         };
-        match self.route_turn(message, &thread_id, prompt) {
+        match self.route_initial_turn(message, &thread_id, prompt) {
             Ok(messages) => Ok(messages),
             Err(error) => Ok(vec![warning(
                 Some(&thread_id),
@@ -626,10 +694,6 @@ impl MessageInterceptor for AgentRouter {
     }
 
     fn server_message(&mut self, message: &Value) -> Result<Vec<Value>, AppError> {
-        if message.get("method").and_then(Value::as_str) == Some("turn/completed") {
-            self.note_completion(message);
-            return Ok(Vec::new());
-        }
         if let Some(key) = request_key(message) {
             if let Some(thread_id) = self.pending_resumes.remove(&key) {
                 self.note_resume_response(&thread_id, message);
@@ -768,15 +832,15 @@ mod tests {
     #[test]
     fn corrections_are_high_precision_and_new_failures_are_not_feedback() {
         assert_eq!(
-            implicit_bias("No, you didn't fix the reconnect bug. Try again."),
-            Some(OutcomeBias::Underpowered)
+            implicit_feedback("No, you didn't fix the reconnect bug. Try again."),
+            Some(FeedbackKind::Underpowered)
         );
         assert_eq!(
-            implicit_bias("That was overkill; keep it simple."),
-            Some(OutcomeBias::Overkill)
+            implicit_feedback("That was overkill; keep it simple."),
+            Some(FeedbackKind::Overkill)
         );
-        assert_eq!(implicit_bias("The reconnect path is failing"), None);
-        assert_eq!(implicit_bias("Please implement another feature"), None);
+        assert_eq!(implicit_feedback("The reconnect path is failing"), None);
+        assert_eq!(implicit_feedback("Please implement another feature"), None);
     }
 
     #[test]
@@ -871,7 +935,7 @@ mod tests {
     }
 
     #[test]
-    fn resume_response_seeds_same_thread_hysteresis_state() {
+    fn resume_response_pins_the_stored_route_without_rerouting() {
         let mut router = AgentRouter::new(
             GlobalArgs {
                 repo: None,
@@ -901,9 +965,254 @@ mod tests {
             }))
             .unwrap();
         let state = router.threads.get("thread-1").unwrap();
+        assert!(state.route_initialized);
         assert_eq!(state.family, Some(ModelFamily::Sol));
         assert_eq!(state.effort, Some(ReasoningLevel::High));
         assert_eq!(state.model.as_deref(), Some("gpt-5.6-sol"));
+
+        let mut turn = json!({
+            "id": 8,
+            "method": "turn/start",
+            "params": {
+                "threadId": "thread-1",
+                "model": "gpt-5.6-sol",
+                "effort": "high",
+                "input": [{ "type": "text", "text": "continue" }]
+            }
+        });
+        assert!(router.client_message(&mut turn).unwrap().is_empty());
+        assert_eq!(turn["params"]["model"], "gpt-5.6-sol");
+        assert_eq!(turn["params"]["effort"], "high");
+        assert!(router.pending.is_empty());
+    }
+
+    #[test]
+    fn follow_up_turns_keep_the_initial_route_without_new_decisions() {
+        let mut router = AgentRouter::new(
+            GlobalArgs {
+                repo: None,
+                codex_bin: None,
+                profile: None,
+                json: false,
+                verbose: false,
+                quiet: false,
+                no_color: false,
+            },
+            RouteArgs::default(),
+            ExplicitNativeOverrides::default(),
+        );
+        router.threads.insert(
+            "thread-1".into(),
+            ThreadState {
+                route_initialized: true,
+                family: Some(ModelFamily::Terra),
+                effort: Some(ReasoningLevel::Medium),
+                model: Some("gpt-5.6-terra".into()),
+                native_effort: Some("medium".into()),
+                service_tier: Some("flex".into()),
+                ..ThreadState::default()
+            },
+        );
+        let mut turn = json!({
+            "id": 9,
+            "method": "turn/start",
+            "params": {
+                "threadId": "thread-1",
+                "model": "gpt-5.6-terra",
+                "effort": "medium",
+                "serviceTier": "flex",
+                "collaborationMode": {
+                    "settings": {
+                        "model": "gpt-5.6-terra",
+                        "reasoning_effort": "medium"
+                    }
+                },
+                "input": [{ "type": "text", "text": "continue with the fix" }]
+            }
+        });
+
+        assert!(router.client_message(&mut turn).unwrap().is_empty());
+        assert_eq!(turn["params"]["model"], "gpt-5.6-terra");
+        assert_eq!(turn["params"]["effort"], "medium");
+        assert_eq!(turn["params"]["serviceTier"], "flex");
+        assert_eq!(
+            turn["params"]["collaborationMode"]["settings"]["model"],
+            "gpt-5.6-terra"
+        );
+        assert_eq!(
+            turn["params"]["collaborationMode"]["settings"]["reasoning_effort"],
+            "medium"
+        );
+        assert!(router.pending.is_empty());
+    }
+
+    #[test]
+    fn initial_non_text_input_pins_the_native_route_for_the_thread() {
+        let mut router = AgentRouter::new(
+            GlobalArgs {
+                repo: None,
+                codex_bin: None,
+                profile: None,
+                json: false,
+                verbose: false,
+                quiet: false,
+                no_color: false,
+            },
+            RouteArgs::default(),
+            ExplicitNativeOverrides::default(),
+        );
+        let mut turn = json!({
+            "id": 12,
+            "method": "turn/start",
+            "params": {
+                "threadId": "thread-1",
+                "model": "gpt-5.6-terra",
+                "effort": "medium",
+                "input": [{ "type": "image", "url": "ignored" }]
+            }
+        });
+        let messages = router.client_message(&mut turn).unwrap();
+        assert_eq!(messages.len(), 1);
+        let state = router.threads.get("thread-1").unwrap();
+        assert!(state.route_initialized);
+        assert_eq!(state.model.as_deref(), Some("gpt-5.6-terra"));
+        assert_eq!(state.effort, Some(ReasoningLevel::Medium));
+        assert!(router.pending.is_empty());
+    }
+
+    #[test]
+    fn ultra_display_level_does_not_mistake_its_native_effort_for_an_override() {
+        let mut router = AgentRouter::new(
+            GlobalArgs {
+                repo: None,
+                codex_bin: None,
+                profile: None,
+                json: false,
+                verbose: false,
+                quiet: false,
+                no_color: false,
+            },
+            RouteArgs::default(),
+            ExplicitNativeOverrides::default(),
+        );
+        router.threads.insert(
+            "thread-1".into(),
+            ThreadState {
+                route_initialized: true,
+                family: Some(ModelFamily::Sol),
+                effort: Some(ReasoningLevel::Ultra),
+                model: Some("gpt-5.6-sol".into()),
+                native_effort: Some("max".into()),
+                service_tier: Some("flex".into()),
+                ..ThreadState::default()
+            },
+        );
+        let mut turn = json!({
+            "id": 13,
+            "method": "turn/start",
+            "params": {
+                "threadId": "thread-1",
+                "model": "gpt-5.6-sol",
+                "effort": "max",
+                "serviceTier": "flex",
+                "input": [{ "type": "text", "text": "continue" }]
+            }
+        });
+        assert!(router.client_message(&mut turn).unwrap().is_empty());
+        assert_eq!(
+            router.threads["thread-1"].effort,
+            Some(ReasoningLevel::Ultra)
+        );
+        assert_eq!(turn["params"]["effort"], "max");
+        assert!(router.pending.is_empty());
+    }
+
+    #[test]
+    fn changed_native_turn_settings_replace_the_pin_without_running_the_router() {
+        let mut router = AgentRouter::new(
+            GlobalArgs {
+                repo: None,
+                codex_bin: None,
+                profile: None,
+                json: false,
+                verbose: false,
+                quiet: false,
+                no_color: false,
+            },
+            RouteArgs::default(),
+            ExplicitNativeOverrides::default(),
+        );
+        router.threads.insert(
+            "thread-1".into(),
+            ThreadState {
+                route_initialized: true,
+                family: Some(ModelFamily::Terra),
+                effort: Some(ReasoningLevel::Medium),
+                model: Some("gpt-5.6-terra".into()),
+                native_effort: Some("medium".into()),
+                ..ThreadState::default()
+            },
+        );
+        let mut turn = json!({
+            "id": 10,
+            "method": "turn/start",
+            "params": {
+                "threadId": "thread-1",
+                "model": "gpt-5.6-sol",
+                "effort": "high",
+                "input": [{ "type": "text", "text": "continue" }]
+            }
+        });
+        assert!(router.client_message(&mut turn).unwrap().is_empty());
+        assert_eq!(turn["params"]["model"], "gpt-5.6-sol");
+        assert_eq!(turn["params"]["effort"], "high");
+        assert!(router.pending.is_empty());
+    }
+
+    #[test]
+    fn command_line_route_pins_ignore_later_native_setting_changes() {
+        let mut router = AgentRouter::new(
+            GlobalArgs {
+                repo: None,
+                codex_bin: None,
+                profile: None,
+                json: false,
+                verbose: false,
+                quiet: false,
+                no_color: false,
+            },
+            RouteArgs {
+                model: Some("gpt-5.6-terra".into()),
+                effort: Some("medium".into()),
+                ..RouteArgs::default()
+            },
+            ExplicitNativeOverrides::default(),
+        );
+        router.threads.insert(
+            "thread-1".into(),
+            ThreadState {
+                route_initialized: true,
+                family: Some(ModelFamily::Terra),
+                effort: Some(ReasoningLevel::Medium),
+                model: Some("gpt-5.6-terra".into()),
+                native_effort: Some("medium".into()),
+                ..ThreadState::default()
+            },
+        );
+        let mut turn = json!({
+            "id": 14,
+            "method": "turn/start",
+            "params": {
+                "threadId": "thread-1",
+                "model": "gpt-5.6-sol",
+                "effort": "max",
+                "input": [{ "type": "text", "text": "continue" }]
+            }
+        });
+        assert!(router.client_message(&mut turn).unwrap().is_empty());
+        assert_eq!(turn["params"]["model"], "gpt-5.6-terra");
+        assert_eq!(turn["params"]["effort"], "medium");
+        assert!(router.pending.is_empty());
     }
 
     #[test]

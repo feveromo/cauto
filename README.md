@@ -10,11 +10,12 @@
 `cauto` is a fast, repository-aware router for the native OpenAI Codex CLI. It
 scores a task, selects the lowest capable installed model and reasoning effort,
 explains the choice, and records a redacted decision. Its adaptive agent mode
-does that before every turn in a native Codex TUI, without requiring manual
-feedback or tuning commands.
+does that once for the opening text turn of a native Codex thread, pins the
+route for the rest of the session, and learns from later corrections without
+requiring manual feedback or tuning commands.
 
 ```text
-each turn ──> cauto scores the work ──> picks a capable route ──> native codex
+first turn ──> cauto picks a route ──> route stays pinned ──> native codex
 ```
 
 It reuses the native CLI's existing ChatGPT authentication, subscription
@@ -32,8 +33,9 @@ billing layer, or OpenAI API client. It never configures an API key.
 - **Adapt without a feedback chore.** Clear corrections and explicit route
   changes become bounded signals automatically; weak proxies such as prompt
   length, tool count, or session duration do not.
-- **See and control every decision.** Route transitions remain visible, preview
-  tools still work, and history contains redacted records—never raw prompts.
+- **See and control every decision.** The initial session route and intentional
+  overrides remain visible, preview tools still work, and history contains
+  redacted records—never raw prompts.
 
 ## Install
 
@@ -66,16 +68,17 @@ cauto --dry-run "fix a typo in README.md"
 ```
 
 `cauto agent` is the recommended interactive path. It starts the real Codex TUI
-through a local transparent transport, routes every text turn, keeps approvals,
-tools, streaming, interruption, and thread storage native, and shuts down its
-App Server child when the TUI exits. `--resume` restores a native Codex thread
-and seeds cauto's same-thread route state from the server.
+through a local transparent transport, routes the first text turn once, pins
+that model and effort for the thread, keeps approvals, tools, streaming,
+interruption, and thread storage native, and shuts down its App Server child
+when the TUI exits. `--resume` restores and preserves the native thread's stored
+route rather than classifying its next follow-up as a new task.
 
 The original `cauto "task"` form remains a one-shot launcher: it routes the
 opening task and then replaces itself with native Codex on Unix. Use it when
-per-turn adaptation is not needed. An invocation without an explicit prompt
-source fails in non-interactive preview/exec modes instead of classifying an
-empty string as cheap work.
+session feedback and route pinning are not needed. An invocation without an
+explicit prompt source fails in non-interactive preview/exec modes instead of
+classifying an empty string as cheap work.
 
 Prompt sources are positional text, `--prompt`, `--prompt-file`, or `--stdin`.
 Use exactly one. Native arguments require `--`, so boundaries are unambiguous:
@@ -187,11 +190,12 @@ by default in the one-shot launcher because separate invocations are separate
 tasks, not turns in one identified thread. Preview decisions never affect hysteresis,
 and history never contains a prior raw prompt.
 
-Adaptive agent threads use their own four-point hysteresis band regardless of
-the cross-invocation setting. A clear underpowered correction raises the next
-route by at least one family/effort step; a clear overkill correction lowers it
-by at most one step. Existing safety floors, explicit choices, installed
-capabilities, and Ultra authorization still win.
+Adaptive agent threads do not use cross-turn hysteresis because they do not
+rerun the router or classifier between turns. The opening route stays pinned.
+A clear underpowered or overkill correction is attached to that initial
+decision and can influence a later new session only after the repository's
+conservative calibration threshold is met. An explicit native model/effort
+change intentionally replaces the current thread's pin.
 
 `cauto models` shows the installed catalog. Add `--refresh`, `--bundled`,
 `--include-hidden`, or `--json`. `cauto doctor` reports the resolved binary,
@@ -234,8 +238,8 @@ In agent mode, explicit native model/effort changes and clear conversational
 corrections such as "still broken" or "that was overkill" are recorded as
 feedback automatically. A repository needs at least three eligible signals and
 70% agreement before cauto automatically applies a bounded +5 or -5 score-point
-calibration. Two consecutive failed turns temporarily raise the next attempt,
-but failures never alter persistent calibration.
+calibration for future sessions. The current thread remains on its pinned route
+unless the user explicitly changes it.
 
 Silence is not treated as approval. Prompt length, elapsed time, token use, and
 tool count are not treated as outcome evidence. `cauto report` separates

@@ -13,7 +13,7 @@ use super::tuning::{CalibrationStore, RepositoryTuning, analyze_repository, load
 pub struct HistoryReport {
     pub schema_version: u32,
     pub total_decisions: u64,
-    /// All successfully launched decisions, including adaptive agent turns.
+    /// All successfully launched decisions, including adaptive agent sessions.
     pub total_launched_decisions: u64,
     pub total_agent_decisions: u64,
     pub total_preview_decisions: u64,

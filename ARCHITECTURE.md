@@ -63,8 +63,10 @@ does not raise normal complexity. Optional threshold hysteresis can read the
 latest same-repository route from a bounded decision-log tail, but it is off by
 default: the one-shot path has no thread identity, so two launcher invocations
 in one repository must be treated as independent tasks rather than adjacent turns.
-Agent mode supplies real thread-local prior family/effort with a four-point
-hysteresis band. Resume responses seed that state before the next routed turn.
+Agent mode routes only the opening text turn and pins the selected model,
+reasoning effort, and service tier for the thread. It therefore does not feed
+follow-up turns through hysteresis. Resume responses seed a stored route and
+prevent the next follow-up from being treated as a new task.
 
 Application orchestration also loads an optional repository-hash calibration
 and passes the validated -10 through +10 typed value into selection. The router
@@ -133,12 +135,12 @@ recommendation automatically.
 
 Agent feedback accepts only explicit model/effort route changes and
 high-precision correction/overkill language. It never infers success from
-silence, duration, tokens, prompt length, or tool count. Repeated failed turns
-can temporarily raise a later turn, but diagnostic failure state is not tuning
-evidence. A concentration of launched decisions at the unresolved generic
-baseline without successful semantic classification is reported directly and
-should trigger a feature/classifier correction rather than repetitive user
-feedback.
+silence, duration, tokens, prompt length, or tool count. Feedback can update
+bounded repository calibration for later sessions, but it never reroutes the
+current thread. A concentration of launched decisions at the unresolved
+generic baseline without successful semantic classification is reported
+directly and should trigger a feature/classifier correction rather than
+repetitive user feedback.
 
 Applied calibration uses a separate versioned
 `~/.local/state/cauto/calibration.json` store keyed only by repository hash.
@@ -170,14 +172,16 @@ with `--remote` pointed at cauto's separately reserved loopback endpoint. The
 control connection closes after negotiation; the TUI connection remains a
 transparent full-duplex relay.
 
-Only client `turn/start` text requests are routed. Both top-level model/effort
-and authoritative `collaborationMode.settings` are rewritten. The corresponding
-decision is logged only after App Server accepts the request. Server
-`turn/completed` notifications update consecutive-failure state;
-`thread/settings/update` captures explicit user route changes; and
-`thread/resume` responses restore the live family/effort. Every route transition
-is emitted as a native warning notification. If routing fails, the untouched
-native request is forwarded with a warning instead of blocking the session.
+Only the first client `turn/start` text request for a new thread is routed and
+logged, after App Server accepts it. Both top-level model/effort and
+authoritative `collaborationMode.settings` are rewritten, then the exact model,
+native effort, and service tier are pinned for later turns without invoking the
+router or classifier again. A later native turn setting that differs from the
+pin is treated as an explicit user route change and becomes the new pin;
+`thread/resume` responses restore and pin the stored route. Clear corrections
+are feedback for future sessions, not triggers for a same-thread route change.
+If initial routing fails, the untouched native request is forwarded with a
+warning instead of blocking the session.
 
 Child guards terminate and reap the App Server and TUI on every return path.
 The relay binds only `127.0.0.1`, inherits the native TUI's stdio, sandbox,

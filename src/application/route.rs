@@ -19,21 +19,6 @@ use super::decision::{DecisionLogInput, write as write_decision};
 use super::prompt;
 use super::{catalog_for, load_context_and_config, resolve_installation};
 
-const AGENT_HYSTERESIS_POINTS: u8 = 4;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum OutcomeBias {
-    Underpowered,
-    Overkill,
-}
-
-#[derive(Clone, Debug, Default)]
-pub(super) struct SessionRouteContext {
-    pub prior_family: Option<ModelFamily>,
-    pub prior_effort: Option<ReasoningLevel>,
-    pub outcome_bias: Option<OutcomeBias>,
-}
-
 pub(super) struct ResolvedRoute {
     pub context: crate::context::ContextSnapshot,
     pub loaded: crate::config::LoadedConfig,
@@ -45,101 +30,6 @@ pub(super) struct ResolvedRoute {
     pub policy: InjectionPolicy,
     pub classifier_ran: bool,
     pub classifier_outcome: String,
-}
-
-fn promoted_family(family: &ModelFamily) -> ModelFamily {
-    match family {
-        ModelFamily::Luna => ModelFamily::Terra,
-        ModelFamily::Terra => ModelFamily::Sol,
-        ModelFamily::Sol => ModelFamily::Sol,
-        ModelFamily::Other(value) => ModelFamily::Other(value.clone()),
-    }
-}
-
-fn demoted_family(family: &ModelFamily) -> ModelFamily {
-    match family {
-        ModelFamily::Luna => ModelFamily::Luna,
-        ModelFamily::Terra => ModelFamily::Luna,
-        ModelFamily::Sol | ModelFamily::Other(_) => ModelFamily::Terra,
-    }
-}
-
-const fn promoted_effort(effort: ReasoningLevel) -> ReasoningLevel {
-    match effort {
-        ReasoningLevel::Minimal | ReasoningLevel::Low => ReasoningLevel::Medium,
-        ReasoningLevel::Medium => ReasoningLevel::High,
-        ReasoningLevel::High => ReasoningLevel::ExtraHigh,
-        ReasoningLevel::ExtraHigh => ReasoningLevel::Max,
-        ReasoningLevel::Max => ReasoningLevel::Max,
-        ReasoningLevel::Ultra => ReasoningLevel::Ultra,
-    }
-}
-
-const fn demoted_effort(effort: ReasoningLevel) -> ReasoningLevel {
-    match effort {
-        ReasoningLevel::Minimal | ReasoningLevel::Low => ReasoningLevel::Low,
-        ReasoningLevel::Medium => ReasoningLevel::Low,
-        ReasoningLevel::High => ReasoningLevel::Medium,
-        ReasoningLevel::ExtraHigh => ReasoningLevel::High,
-        ReasoningLevel::Max | ReasoningLevel::Ultra => ReasoningLevel::ExtraHigh,
-    }
-}
-
-fn apply_session_context(
-    constraints: &mut crate::routing::SelectionConstraints,
-    session: Option<&SessionRouteContext>,
-) {
-    let Some(session) = session else {
-        return;
-    };
-    constraints.hysteresis_points = constraints.hysteresis_points.max(AGENT_HYSTERESIS_POINTS);
-    constraints.prior_family.clone_from(&session.prior_family);
-    constraints.prior_effort = session.prior_effort;
-    match session.outcome_bias {
-        Some(OutcomeBias::Underpowered) => {
-            if let Some(prior) = &session.prior_family {
-                let floor = promoted_family(prior);
-                if constraints
-                    .family_floor
-                    .as_ref()
-                    .is_none_or(|current| current.rank() < floor.rank())
-                {
-                    constraints.family_floor = Some(floor);
-                }
-            }
-            if let Some(prior) = session.prior_effort {
-                let floor = promoted_effort(prior);
-                if constraints
-                    .effort_floor
-                    .is_none_or(|current| current < floor)
-                {
-                    constraints.effort_floor = Some(floor);
-                }
-            }
-        }
-        Some(OutcomeBias::Overkill) => {
-            if let Some(prior) = &session.prior_family {
-                let ceiling = demoted_family(prior);
-                if constraints
-                    .family_ceiling
-                    .as_ref()
-                    .is_none_or(|current| current.rank() > ceiling.rank())
-                {
-                    constraints.family_ceiling = Some(ceiling);
-                }
-            }
-            if let Some(prior) = session.prior_effort {
-                let ceiling = demoted_effort(prior);
-                if constraints
-                    .effort_ceiling
-                    .is_none_or(|current| current > ceiling)
-                {
-                    constraints.effort_ceiling = Some(ceiling);
-                }
-            }
-        }
-        None => {}
-    }
 }
 
 fn effective_fast(args: &RouteArgs, config: &crate::config::LoadedConfig) -> FastMode {
@@ -215,7 +105,7 @@ pub(super) fn resolve_route(
     args: &RouteArgs,
     mode: LaunchMode,
     explain: bool,
-    session: Option<&SessionRouteContext>,
+    agent_session: bool,
 ) -> Result<ResolvedRoute, AppError> {
     if args
         .forwarded
@@ -253,7 +143,7 @@ pub(super) fn resolve_route(
             }
         }
     }
-    if session.is_none() && constraints.hysteresis_points > 0 {
+    if !agent_session && constraints.hysteresis_points > 0 {
         match crate::state::decision_log::latest_route(&paths.decisions(), &repository_id) {
             Ok(Some((family, effort))) => {
                 constraints.prior_family = Some(family);
@@ -267,7 +157,6 @@ pub(super) fn resolve_route(
             }
         }
     }
-    apply_session_context(&mut constraints, session);
     constraints.explicit_family = args
         .family
         .as_deref()
@@ -311,19 +200,6 @@ pub(super) fn resolve_route(
             .count()
             >= 2;
     let mut reasons = features.reasons.clone();
-    if let Some(session) = session {
-        match session.outcome_bias {
-            Some(OutcomeBias::Underpowered) => reasons.push(Reason {
-                label: "same-thread correction or repeated failure".into(),
-                contribution: 20,
-            }),
-            Some(OutcomeBias::Overkill) => reasons.push(Reason {
-                label: "same-thread overkill correction".into(),
-                contribution: -20,
-            }),
-            None => {}
-        }
-    }
     reasons.extend(applied.matches.iter().map(|matched| Reason {
         label: matched.reason.clone(),
         contribution: i16::from(
@@ -519,7 +395,7 @@ pub(super) fn run_route(
     mode: LaunchMode,
     explain: bool,
 ) -> Result<ExitCode, AppError> {
-    let resolved = resolve_route(global, &args, mode, explain, None)?;
+    let resolved = resolve_route(global, &args, mode, explain, false)?;
     let ResolvedRoute {
         context,
         loaded,
@@ -599,59 +475,4 @@ pub(super) fn run_route(
         println!("Launching native Codex...");
     }
     crate::codex::launch::execute(&plan, policy)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::routing::{
-        DimensionScores, EvidenceQuality, SelectionConstraints, TaskType, Weights,
-    };
-
-    #[test]
-    fn underpowered_outcome_promotes_one_step_and_enables_thread_hysteresis() {
-        let mut constraints = SelectionConstraints::default();
-        apply_session_context(
-            &mut constraints,
-            Some(&SessionRouteContext {
-                prior_family: Some(ModelFamily::Terra),
-                prior_effort: Some(ReasoningLevel::Medium),
-                outcome_bias: Some(OutcomeBias::Underpowered),
-            }),
-        );
-        assert_eq!(constraints.hysteresis_points, AGENT_HYSTERESIS_POINTS);
-        assert_eq!(constraints.family_floor, Some(ModelFamily::Sol));
-        assert_eq!(constraints.effort_floor, Some(ReasoningLevel::High));
-    }
-
-    #[test]
-    fn overkill_outcome_cannot_override_existing_safety_floors() {
-        let mut constraints = SelectionConstraints {
-            family_floor: Some(ModelFamily::Sol),
-            effort_floor: Some(ReasoningLevel::Max),
-            ..SelectionConstraints::default()
-        };
-        apply_session_context(
-            &mut constraints,
-            Some(&SessionRouteContext {
-                prior_family: Some(ModelFamily::Sol),
-                prior_effort: Some(ReasoningLevel::Max),
-                outcome_bias: Some(OutcomeBias::Overkill),
-            }),
-        );
-        let decision = route(
-            TaskType::Coding,
-            DimensionScores::default(),
-            Weights::default(),
-            constraints,
-            Vec::new(),
-            Vec::new(),
-            EvidenceQuality::default(),
-            Vec::new(),
-            Vec::new(),
-        );
-        assert_eq!(decision.recommended_family, ModelFamily::Sol);
-        assert_eq!(decision.recommended_effort, ReasoningLevel::Max);
-        assert_eq!(decision.conflicts.len(), 2);
-    }
 }

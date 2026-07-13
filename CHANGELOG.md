@@ -5,16 +5,17 @@
 ## 0.2.0 - 2026-07-13
 
 - Add `cauto agent`, a loopback-only transparent App Server transport that
-  routes every native Codex TUI text turn while preserving native lifecycle,
-  approvals, tools, streaming, interruption, and persisted threads.
-- Add thread-local hysteresis, visible route transitions, resume-state seeding,
-  one-step correction/overkill adaptation, and temporary repeated-failure
-  escalation without using weak outcome proxies.
+  routes the opening native Codex TUI text turn, pins that route for the thread,
+  and preserves native lifecycle, approvals, tools, streaming, interruption,
+  and persisted threads.
+- Preserve resumed routes and honor explicit in-session model changes without
+  treating ordinary follow-up prompts as new routing decisions.
 - Record explicit route changes and clear conversational corrections
   automatically, and auto-apply the existing bounded repository calibration
-  only after three signals with at least 70% directional agreement.
-- Count adaptive-agent turns as real launches in reports and expose agent route
-  and feedback-source distributions.
+  for future sessions only after three signals with at least 70% directional
+  agreement.
+- Count adaptive-agent session decisions as real launches in reports and expose
+  agent route and feedback-source distributions.
 
 - Route natural-language operational failures, routing audits, and adversarial
   research from task risk instead of prompt length or a generic baseline.

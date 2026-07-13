@@ -233,7 +233,7 @@ pub(super) fn run_report(global: &GlobalArgs) -> Result<ExitCode, AppError> {
         );
     } else {
         println!(
-            "Decisions: {} total ({} launched, including {} adaptive-agent turns; {} preview; {} legacy/untyped)",
+            "Decisions: {} total ({} launched, including {} adaptive-agent sessions; {} preview; {} legacy/untyped)",
             report.total_decisions,
             report.total_launched_decisions,
             report.total_agent_decisions,
