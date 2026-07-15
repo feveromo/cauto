@@ -14,7 +14,7 @@ use tungstenite::{Message, WebSocket};
 
 use crate::error::AppError;
 
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const APP_SERVER_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const RELAY_POLL: Duration = Duration::from_millis(8);
 
 pub(crate) trait MessageInterceptor {
@@ -119,7 +119,7 @@ fn connect_with_retry(endpoint: &str) -> Result<WebSocket<MaybeTlsStream<TcpStre
     loop {
         match tungstenite::connect(endpoint) {
             Ok((socket, _)) => return Ok(socket),
-            Err(_) if started.elapsed() < CONNECT_TIMEOUT => {
+            Err(_) if started.elapsed() < APP_SERVER_CONNECT_TIMEOUT => {
                 thread::sleep(Duration::from_millis(25));
             }
             Err(error) => return Err(app_error("App Server did not become ready", error)),
@@ -278,7 +278,6 @@ fn accept_tui(
     listener
         .set_nonblocking(true)
         .map_err(|error| app_error("failed to configure proxy listener", error))?;
-    let started = Instant::now();
     loop {
         match listener.accept() {
             Ok((stream, _)) => {
@@ -301,11 +300,10 @@ fn accept_tui(
                         "Codex TUI exited before connecting to the proxy ({status})"
                     )));
                 }
-                if started.elapsed() >= CONNECT_TIMEOUT {
-                    return Err(AppError::AppServer(
-                        "Codex TUI did not connect to the local proxy within 10 seconds".into(),
-                    ));
-                }
+                // Codex can present update, authentication, or other preflight
+                // prompts before it opens the remote connection. Keep waiting
+                // while the visible TUI child is alive so the user controls
+                // how long those interactive steps take.
                 thread::sleep(Duration::from_millis(10));
             }
             Err(error) => return Err(app_error("failed accepting Codex TUI connection", error)),

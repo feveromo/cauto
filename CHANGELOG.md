@@ -5,6 +5,9 @@
 - Restore blocking mode on accepted adaptive-agent TUI sockets before the
   WebSocket handshake, preventing transient macOS `EAGAIN` failures during MCP
   startup and allowing Codex to restore the terminal cleanly on exit.
+- Allow the native TUI to finish interactive update or authentication prompts
+  before it connects to the adaptive-agent relay instead of terminating it
+  after ten seconds.
 - Run formatting, Clippy, and the complete test suite on Linux and macOS in CI.
 
 ## 0.2.0 - 2026-07-13

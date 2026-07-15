@@ -189,7 +189,9 @@ approval, auth, profile, MCP, skills, hooks, and provider behavior, and contains
 no OpenAI API key or billing path.
 
 The proxy listener is nonblocking only while it waits for the TUI to connect.
-The accepted stream is restored to blocking mode before its WebSocket handshake;
-bounded read timeouts drive cooperative duplex polling while writes retain
-normal backpressure. This keeps a transient Darwin `EAGAIN` from terminating the
-relay during bursty App Server startup events.
+It keeps waiting as long as the native TUI process is alive, allowing Codex to
+complete interactive update or authentication prompts before opening the remote
+connection. Once connected, the accepted stream is restored to blocking mode
+before its WebSocket handshake; bounded read timeouts drive cooperative duplex
+polling while writes retain normal backpressure. This keeps a transient Darwin
+`EAGAIN` from terminating the relay during bursty App Server startup events.
