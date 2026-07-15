@@ -39,10 +39,23 @@ pub fn fake_codex(directory: &Path) -> PathBuf {
 pub fn cauto_command(home: &Path) -> Command {
     let mut command = assert_cmd::cargo::cargo_bin_cmd!("cauto");
     command
+        .env("HOME", home)
+        .env("USERPROFILE", home)
         .env("XDG_CONFIG_HOME", home.join("config"))
         .env("XDG_CACHE_HOME", home.join("cache"))
         .env("XDG_STATE_HOME", home.join("state"))
         .env("CAUTO_DISABLE_LOG", "1")
         .env("NO_COLOR", "1");
     command
+}
+
+pub fn cauto_state_dir(home: &Path) -> PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        home.join("Library/Application Support/cauto")
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        home.join("state/cauto")
+    }
 }

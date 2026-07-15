@@ -5,6 +5,11 @@ edition = "2024"
 rust-version = "1.89"
 description = "Repository-aware native Codex model and reasoning router"
 license = "MIT"
+repository = "https://github.com/feveromo/cauto"
+homepage = "https://github.com/feveromo/cauto"
+readme = "README.md"
+keywords = ["codex", "cli", "ai", "router", "developer-tools"]
+categories = ["command-line-utilities", "development-tools"]
 
 [lib]
 name = "cauto"

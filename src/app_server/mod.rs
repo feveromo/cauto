@@ -282,6 +282,7 @@ fn accept_tui(
     loop {
         match listener.accept() {
             Ok((stream, _)) => {
+                configure_accepted_tui_stream(&stream)?;
                 let mut socket = tungstenite::accept(stream)
                     .map_err(|error| app_error("Codex TUI WebSocket handshake failed", error))?;
                 socket
@@ -310,6 +311,16 @@ fn accept_tui(
             Err(error) => return Err(app_error("failed accepting Codex TUI connection", error)),
         }
     }
+}
+
+fn configure_accepted_tui_stream(stream: &TcpStream) -> Result<(), AppError> {
+    // Darwin can propagate O_NONBLOCK from the listener to accepted sockets.
+    // Relay reads use a timeout for cooperative polling, but writes must retain
+    // normal blocking backpressure instead of surfacing a transient EAGAIN as
+    // a fatal App Server forwarding error.
+    stream
+        .set_nonblocking(false)
+        .map_err(|error| app_error("failed to configure accepted TUI socket", error))
 }
 
 fn idle_error(error: &tungstenite::Error) -> bool {
@@ -480,5 +491,31 @@ mod tests {
         let (output, synthetic) = transform_client(binary.clone(), &mut recorder).unwrap();
         assert_eq!(output, binary);
         assert!(synthetic.is_empty());
+    }
+
+    #[test]
+    fn accepted_tui_stream_is_restored_to_blocking_mode() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let client = thread::spawn(move || TcpStream::connect(address).unwrap());
+        let (mut stream, _) = listener.accept().unwrap();
+        let _client = client.join().unwrap();
+
+        stream.set_nonblocking(true).unwrap();
+        configure_accepted_tui_stream(&stream).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_millis(40)))
+            .unwrap();
+
+        let started = Instant::now();
+        let error = stream.read(&mut [0_u8; 1]).unwrap_err();
+        assert!(matches!(
+            error.kind(),
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+        ));
+        assert!(
+            started.elapsed() >= Duration::from_millis(10),
+            "configured stream returned immediately instead of waiting for its read timeout"
+        );
     }
 }

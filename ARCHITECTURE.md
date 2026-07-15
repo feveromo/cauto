@@ -187,3 +187,9 @@ Child guards terminate and reap the App Server and TUI on every return path.
 The relay binds only `127.0.0.1`, inherits the native TUI's stdio, sandbox,
 approval, auth, profile, MCP, skills, hooks, and provider behavior, and contains
 no OpenAI API key or billing path.
+
+The proxy listener is nonblocking only while it waits for the TUI to connect.
+The accepted stream is restored to blocking mode before its WebSocket handshake;
+bounded read timeouts drive cooperative duplex polling while writes retain
+normal backpressure. This keeps a transient Darwin `EAGAIN` from terminating the
+relay during bursty App Server startup events.

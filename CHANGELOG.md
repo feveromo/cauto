@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Restore blocking mode on accepted adaptive-agent TUI sockets before the
+  WebSocket handshake, preventing transient macOS `EAGAIN` failures during MCP
+  startup and allowing Codex to restore the terminal cleanly on exit.
+- Run formatting, Clippy, and the complete test suite on Linux and macOS in CI.
+
 ## 0.2.0 - 2026-07-13
 
 - Add `cauto agent`, a loopback-only transparent App Server transport that

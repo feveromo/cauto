@@ -4,6 +4,7 @@
 > without changing how you use Codex.
 
 [![Rust 1.89+](https://img.shields.io/badge/Rust-1.89%2B-dea584?logo=rust&logoColor=white)](https://www.rust-lang.org/)
+[![CI](https://github.com/feveromo/cauto/actions/workflows/ci.yml/badge.svg)](https://github.com/feveromo/cauto/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-4c1?logo=opensourceinitiative&logoColor=white)](LICENSE)
 [![Native Codex launcher](https://img.shields.io/badge/launches-native%20Codex-101828?logo=openai&logoColor=white)](https://github.com/openai/codex)
 

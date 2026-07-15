@@ -218,8 +218,9 @@ fn tune_cli_is_read_only_then_apply_and_reset_are_repository_scoped() {
     let home = tempdir().unwrap();
     let repository = home.path().join("repository");
     std::fs::create_dir(&repository).unwrap();
-    let repository_id = repository_identifier(&repository);
-    let decisions = home.path().join("state/cauto/decisions.jsonl");
+    let repository_id = repository_identifier(&repository.canonicalize().unwrap());
+    let state = common::cauto_state_dir(home.path());
+    let decisions = state.join("decisions.jsonl");
     for index in 0..3 {
         let id = format!("id-{index}");
         append_json_line(
@@ -229,7 +230,7 @@ fn tune_cli_is_read_only_then_apply_and_reset_are_repository_scoped() {
         .unwrap();
         append_feedback(&decisions, &id, &repository_id, "underpowered");
     }
-    let calibration = home.path().join("state/cauto/calibration.json");
+    let calibration = state.join("calibration.json");
 
     common::cauto_command(home.path())
         .args(["--repo", repository.to_str().unwrap(), "tune"])
@@ -324,7 +325,7 @@ fn malformed_calibration_does_not_block_cli_routing() {
     let home = tempdir().unwrap();
     let repository = home.path().join("repository");
     std::fs::create_dir(&repository).unwrap();
-    let calibration = home.path().join("state/cauto/calibration.json");
+    let calibration = common::cauto_state_dir(home.path()).join("calibration.json");
     std::fs::create_dir_all(calibration.parent().unwrap()).unwrap();
     std::fs::write(&calibration, b"malformed").unwrap();
     let codex = common::fake_codex(home.path());

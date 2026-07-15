@@ -13,7 +13,7 @@ pub struct CautoPaths {
 }
 
 impl CautoPaths {
-    /// Resolves XDG-aware user directories.
+    /// Resolves platform-native user directories.
     pub fn discover() -> Result<Self, AppError> {
         let base = BaseDirs::new().ok_or_else(|| {
             AppError::InvalidArguments("the current user has no resolvable home directory".into())
