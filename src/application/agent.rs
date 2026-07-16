@@ -11,7 +11,8 @@ use crate::codex::args::{ExplicitNativeOverrides, inspect_forwarded};
 use crate::codex::launch::InjectionPolicy;
 use crate::error::AppError;
 use crate::routing::{
-    CapabilitySource, LaunchMode, ModelFamily, ReasoningLevel, RoutePreset, RouteSource,
+    CapabilitySource, LaunchMode, ModelFamily, ReasoningLevel, RouteDecision, RoutePreset,
+    RouteSource, RuleMatch, TaskType,
 };
 use crate::state::{
     FeedbackKind, FeedbackSource, analyze_repository, append_feedback_for_decision, load_store,
@@ -94,6 +95,53 @@ fn route_label(family: &ModelFamily, effort: ReasoningLevel) -> String {
         ModelFamily::Other(_) => "Custom",
     };
     format!("{family} / {}", effort.display_name())
+}
+
+fn rule_strength(matched: &RuleMatch) -> u16 {
+    let deltas = matched.dimension_effects;
+    [
+        deltas.scope,
+        deltas.ambiguity,
+        deltas.cost_of_being_wrong,
+        deltas.runtime_dependence,
+        deltas.architectural_depth,
+        deltas.verification_burden,
+        deltas.parallelizability,
+    ]
+    .into_iter()
+    .map(|value| i16::from(value).unsigned_abs())
+    .sum::<u16>()
+        + u16::from(matched.family_floor.is_some() || matched.family_ceiling.is_some())
+        + u16::from(matched.effort_floor.is_some() || matched.effort_ceiling.is_some())
+}
+
+fn humanize_rule_id(rule_id: &str) -> String {
+    let label = rule_id.replace(['-', '_'], " ");
+    let mut characters = label.chars();
+    characters.next().map_or(label.clone(), |first| {
+        first.to_uppercase().collect::<String>() + characters.as_str()
+    })
+}
+
+fn route_reason(decision: &RouteDecision) -> String {
+    if let Some(matched) = decision
+        .matched_rules
+        .iter()
+        .max_by_key(|matched| rule_strength(matched))
+    {
+        return humanize_rule_id(&matched.rule_id);
+    }
+    match decision.task_type {
+        TaskType::Empty => "Codex defaults",
+        TaskType::Documentation => "Documentation",
+        TaskType::Mechanical => "Mechanical change",
+        TaskType::Coding => "Task complexity",
+        TaskType::Diagnosis => "Root-cause diagnosis",
+        TaskType::Architecture => "Architecture",
+        TaskType::Research => "Research",
+        TaskType::Review => "Code review",
+    }
+    .to_owned()
 }
 
 fn prompt_text(params: &Value) -> Option<String> {
@@ -264,10 +312,22 @@ impl AgentRouter {
         message: impl Into<String>,
         hint: impl Into<String>,
     ) -> Vec<Value> {
-        self.info_notifications
-            .then(|| info(Some(thread_id), message, hint))
-            .into_iter()
-            .collect()
+        if self.global.quiet {
+            return Vec::new();
+        }
+        let message = message.into();
+        let hint = hint.into();
+        let notification = if self.info_notifications {
+            info(Some(thread_id), message, hint)
+        } else {
+            let fallback = if hint.trim().is_empty() {
+                message
+            } else {
+                format!("{message} — {hint}")
+            };
+            warning(Some(thread_id), fallback)
+        };
+        vec![notification]
     }
 
     fn preserve_native_route(resolved: &mut ResolvedRoute, params: &Value) -> bool {
@@ -420,7 +480,7 @@ impl AgentRouter {
         let messages = match calibration {
             Ok(calibration) => self.success_message(
                 thread_id,
-                format!("Routing learned from your {direction} selection"),
+                format!("cauto learned from your {direction} selection"),
                 calibration.unwrap_or_else(|| "Applies to future threads".into()),
             ),
             Err(error) => vec![warning(
@@ -493,6 +553,8 @@ impl AgentRouter {
             &resolved.plan.preset.model_family,
             resolved.plan.preset.display_level,
         );
+        let reason = route_reason(&resolved.decision);
+        let route_source = resolved.route_source;
         let key = request_key(request)
             .ok_or_else(|| AppError::AppServer("turn/start request had no id".into()))?;
         self.pending.insert(
@@ -505,19 +567,25 @@ impl AgentRouter {
         if preserved {
             Ok(self.success_message(
                 thread_id,
-                format!("Native route kept · {selected}"),
+                format!("cauto kept Codex's route · {selected}"),
                 if cwd_changed {
-                    "Repository changed after launch"
+                    "Repository changed after launch · pinned for this thread"
                 } else {
-                    "Not enough local evidence to override"
+                    "Not enough evidence to override · pinned for this thread"
                 },
             ))
         } else {
-            Ok(self.success_message(
-                thread_id,
-                format!("Route set · {selected}"),
-                "Pinned for this thread",
-            ))
+            let message = if route_source == RouteSource::Explicit {
+                format!("cauto applied your route · {selected}")
+            } else {
+                format!("cauto routed · {selected}")
+            };
+            let hint = if route_source == RouteSource::Explicit {
+                "Your selection · pinned for this thread".to_owned()
+            } else {
+                format!("{reason} · pinned for this thread")
+            };
+            Ok(self.success_message(thread_id, message, hint))
         }
     }
 
@@ -612,7 +680,7 @@ impl AgentRouter {
         match feedback_result {
             Some(Ok(Some(calibration))) => Ok(self.success_message(
                 thread_id,
-                "Routing learned from this correction",
+                "cauto learned from this correction",
                 calibration,
             )),
             Some(Err(error)) => Ok(vec![warning(
@@ -645,8 +713,8 @@ impl AgentRouter {
             .map(str::to_owned);
         self.success_message(
             thread_id,
-            "Native route kept",
-            "Non-text opening · pinned for this thread",
+            "cauto kept Codex's route",
+            "First input was non-text · pinned for this thread",
         )
     }
 
@@ -1064,11 +1132,93 @@ mod tests {
         assert_eq!(turn["params"]["model"], "gpt-5.6-luna");
         assert_eq!(turn["params"]["effort"], "low");
         assert_eq!(messages[0]["method"], "info");
-        assert_eq!(messages[0]["params"]["message"], "Route set · Luna / Low");
+        assert_eq!(
+            messages[0]["params"]["message"],
+            "cauto routed · Luna / Low"
+        );
+        assert_eq!(
+            messages[0]["params"]["hint"],
+            "Documentation · pinned for this thread"
+        );
         assert_eq!(
             router.pending["\"turn-local\""].resolved.route_source,
             RouteSource::Local
         );
+    }
+
+    #[test]
+    fn decisive_first_turn_is_visible_without_info_capability() {
+        let mut router = AgentRouter::new(
+            GlobalArgs {
+                repo: None,
+                codex_bin: None,
+                profile: None,
+                json: false,
+                verbose: false,
+                quiet: false,
+                no_color: false,
+            },
+            RouteArgs::default(),
+            ExplicitNativeOverrides::default(),
+        );
+        let mut turn = json!({
+            "id": "turn-compatible",
+            "method": "turn/start",
+            "params": {
+                "threadId": "thread-compatible",
+                "model": "gpt-5.6-sol",
+                "effort": "xhigh",
+                "input": [{
+                    "type": "text",
+                    "text": "what is this project? explain to me like im 5"
+                }]
+            }
+        });
+
+        let messages = router.client_message(&mut turn).unwrap();
+        assert_eq!(turn["params"]["model"], "gpt-5.6-luna");
+        assert_eq!(turn["params"]["effort"], "low");
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["method"], "warning");
+        assert_eq!(
+            messages[0]["params"]["message"],
+            "cauto routed · Luna / Low — Documentation · pinned for this thread"
+        );
+    }
+
+    #[test]
+    fn quiet_suppresses_success_notice_without_suppressing_routing() {
+        let mut router = AgentRouter::new(
+            GlobalArgs {
+                repo: None,
+                codex_bin: None,
+                profile: None,
+                json: false,
+                verbose: false,
+                quiet: true,
+                no_color: false,
+            },
+            RouteArgs::default(),
+            ExplicitNativeOverrides::default(),
+        );
+        let mut turn = json!({
+            "id": "turn-quiet",
+            "method": "turn/start",
+            "params": {
+                "threadId": "thread-quiet",
+                "model": "gpt-5.6-sol",
+                "effort": "xhigh",
+                "input": [{
+                    "type": "text",
+                    "text": "what is this project? explain to me like im 5"
+                }]
+            }
+        });
+
+        let messages = router.client_message(&mut turn).unwrap();
+        assert_eq!(turn["params"]["model"], "gpt-5.6-luna");
+        assert_eq!(turn["params"]["effort"], "low");
+        assert!(messages.is_empty());
     }
 
     #[test]
@@ -1104,11 +1254,11 @@ mod tests {
         assert_eq!(messages[0]["method"], "info");
         assert_eq!(
             messages[0]["params"]["message"],
-            "Native route kept · Sol / Extra High"
+            "cauto kept Codex's route · Sol / Extra High"
         );
         assert_eq!(
             messages[0]["params"]["hint"],
-            "Not enough local evidence to override"
+            "Not enough evidence to override · pinned for this thread"
         );
         assert_eq!(
             router.pending["\"turn-native\""].resolved.route_source,
@@ -1312,7 +1462,11 @@ mod tests {
         let messages = router.client_message(&mut turn).unwrap();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0]["method"], "info");
-        assert_eq!(messages[0]["params"]["message"], "Native route kept");
+        assert_eq!(messages[0]["params"]["message"], "cauto kept Codex's route");
+        assert_eq!(
+            messages[0]["params"]["hint"],
+            "First input was non-text · pinned for this thread"
+        );
         let state = router.threads.get("thread-1").unwrap();
         assert!(state.route_initialized);
         assert_eq!(state.model.as_deref(), Some("gpt-5.6-terra"));

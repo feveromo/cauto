@@ -180,8 +180,12 @@ The real request/response is relayed before cosmetic routing messages or
 decision logging. If local evidence is insufficient, the untouched native route
 is pinned. If routing fails, the untouched native request is forwarded with a
 warning instead of blocking the session. Successful route choices are emitted
-only as an `info` notification when the TUI advertises support; older clients
-remain silent, while actual failures retain warning severity.
+as an `info` notification when the TUI advertises support. Otherwise they use
+the compatible warning notification, because it is the current App Server's
+renderable generic-notice channel. Both forms name the selected route, explain
+the strongest reason, and state that the choice is pinned for the thread.
+`--quiet` suppresses successful notices only; actual failures retain warning
+severity and remain visible.
 
 Child guards terminate and reap the App Server and TUI on every return path.
 The relay binds only `127.0.0.1`, inherits the native TUI's stdio, sandbox,

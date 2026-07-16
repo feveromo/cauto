@@ -216,11 +216,13 @@ Git command, or filesystem walk is on that prompt path.
 
 When local evidence is decisive, cauto applies the route and pins it. When it
 is not, cauto preserves the native Codex route and records that provenance.
-Clients that advertise the optional `infoNotifications` capability receive a
-calm informational line such as `Route set · Luna / Low` or
-`Native route kept · Sol / Extra High`, with a short reason. Older Codex builds
-stay silent rather than rendering ordinary routing as a warning. Actual routing
-or persistence failures still use native warning notifications.
+Unless `--quiet` is set, every first-turn choice is surfaced with the selected
+model, effort, reason, and pin state. Clients that advertise the optional
+`infoNotifications` capability receive a calm two-part notice such as
+`cauto routed · Luna / Low` with `Documentation · pinned for this thread`.
+Other Codex builds receive the same content through the supported warning
+notification so routing is never silently hidden. `--quiet` suppresses only
+successful route notices; routing and persistence failures remain visible.
 
 ## Privacy And History
 

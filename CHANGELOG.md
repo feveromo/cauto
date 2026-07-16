@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Surface every successful first-turn route by default, including its reason
+  and thread pin state. Use native informational notices when supported and a
+  compatible visible fallback otherwise; `--quiet` suppresses success notices
+  without hiding routing or persistence failures.
+
 ## 0.3.0 - 2026-07-16
 
 - Remove the hidden model classifier and all classifier CLI/config controls;
