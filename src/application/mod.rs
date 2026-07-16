@@ -62,6 +62,9 @@ pub fn run(cli: Cli) -> Result<ExitCode, AppError> {
             catalog,
             iterations,
         }) => commands::run_core_benchmark(&policy, &catalog, iterations),
+        Some(Commands::BenchAgentRoute { iterations }) => {
+            route::run_agent_route_benchmark(&cli.global, iterations)
+        }
     }
 }
 
@@ -75,9 +78,6 @@ fn merge_route_args(root: &RouteArgs, subcommand: RouteArgs) -> Result<RouteArgs
         || root.inherit_fast
         || root.allow_ultra
         || root.allow_downgrade
-        || root.classifier.is_some()
-        || root.no_classifier
-        || root.run_classifier
         || root.offline
         || root.dry_run
         || root.print_command

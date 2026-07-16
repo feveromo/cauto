@@ -12,7 +12,8 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use crate::cache::ensure_private_dir;
 use crate::error::AppError;
 use crate::routing::{
-    CapabilitySource, Conflict, DimensionScores, Downgrade, ModelFamily, ReasoningLevel, TaskType,
+    CapabilitySource, Conflict, DimensionScores, Downgrade, ModelFamily, ReasoningLevel,
+    RouteSource, TaskType,
 };
 
 #[cfg(unix)]
@@ -51,7 +52,13 @@ pub struct DecisionRecord {
     pub selected_effort: ReasoningLevel,
     pub ultra_candidate: bool,
     pub ultra_selected: bool,
+    #[serde(default)]
+    pub route_source: RouteSource,
+    #[serde(default)]
+    pub routing_elapsed_micros: u64,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub classifier_ran: bool,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub classifier_outcome: String,
     pub catalog_source: CapabilitySource,
     pub downgrade: Option<Downgrade>,

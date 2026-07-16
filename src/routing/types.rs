@@ -184,32 +184,6 @@ impl<'de> Deserialize<'de> for ReasoningLevel {
     }
 }
 
-/// Controls optional second-stage classifier invocation.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ClassifierMode {
-    /// Run only when deterministic confidence or conflicts warrant it.
-    #[default]
-    Auto,
-    /// Run whenever the classifier boundary is otherwise usable.
-    Always,
-    /// Never run the classifier.
-    Never,
-}
-
-impl FromStr for ClassifierMode {
-    type Err = String;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value.to_ascii_lowercase().as_str() {
-            "auto" => Ok(Self::Auto),
-            "always" => Ok(Self::Always),
-            "never" => Ok(Self::Never),
-            _ => Err(format!("unknown classifier mode {value:?}")),
-        }
-    }
-}
-
 /// Native Codex launch surface.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -218,6 +192,19 @@ pub enum LaunchMode {
     Interactive,
     /// Non-interactive native `codex exec`.
     Exec,
+}
+
+/// Provenance of a route applied to a launch or adaptive-agent thread.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RouteSource {
+    /// Selected by cauto's deterministic local routing engine.
+    #[default]
+    Local,
+    /// Preserved from native Codex because local evidence was insufficient.
+    NativePreserved,
+    /// Selected through an explicit command-line or in-session override.
+    Explicit,
 }
 
 /// Per-launch Fast service-tier behavior.

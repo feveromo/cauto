@@ -104,7 +104,8 @@ pub(super) fn run_doctor(global: &GlobalArgs) -> Result<ExitCode, AppError> {
         "catalog_age_seconds": catalog.cache_age_seconds,
         "catalog_stale": catalog.stale,
         "native_unix_exec": cfg!(unix),
-        "classifier_usable": luna.is_some() && std::env::var_os("CAUTO_CLASSIFIER").is_none(),
+        "routing_engine": "local-rust",
+        "agent_hot_path_prepared": true,
         "aliases": {
             "sol": sol.map(|model| model.id.as_str()),
             "terra": terra.map(|model| model.id.as_str()),
@@ -171,7 +172,8 @@ pub(super) fn run_doctor(global: &GlobalArgs) -> Result<ExitCode, AppError> {
             catalog.stale
         );
         println!("Native Unix exec: {}", cfg!(unix));
-        println!("Classifier usable: {}", luna.is_some());
+        println!("Routing engine: local Rust (no model classifier)");
+        println!("Agent hot path prepared: true");
         println!(
             "Aliases: sol={}, terra={}, luna={}",
             sol.map(|model| model.id.as_str()).unwrap_or("unavailable"),
@@ -244,17 +246,36 @@ pub(super) fn run_report(global: &GlobalArgs) -> Result<ExitCode, AppError> {
             "Average confidence (launched): {}%",
             (u32::from(report.average_confidence_basis_points) + 50) / 100
         );
-        println!(
-            "Classifier invocation/failure (launched): {}% / {}%",
-            report.classifier_invocation_rate_basis_points / 100,
-            report.classifier_failure_rate_basis_points / 100
-        );
+        if report.legacy_classifier_sample_count > 0 {
+            println!(
+                "Legacy classifier invocation/failure ({} old decisions): {}% / {}%",
+                report.legacy_classifier_sample_count,
+                report.legacy_classifier_invocation_rate_basis_points / 100,
+                report.legacy_classifier_failure_rate_basis_points / 100
+            );
+        }
         println!(
             "Catalog fallback/downgrade (launched): {}% / {}%",
             report.catalog_fallback_rate_basis_points / 100,
             report.downgrade_rate_basis_points / 100
         );
         println!("Routes (launched): {:?}", report.route_distribution);
+        println!("Route sources: {:?}", report.route_source_distribution);
+        if report.total_agent_decisions > 0 {
+            println!(
+                "Native routes preserved (adaptive agent): {}%",
+                report.agent_native_preserved_rate_basis_points / 100
+            );
+        }
+        if report.routing_latency_micros.sample_count > 0 {
+            println!(
+                "Local routing latency ({} samples): p50={}us, p95={}us, max={}us",
+                report.routing_latency_micros.sample_count,
+                report.routing_latency_micros.p50,
+                report.routing_latency_micros.p95,
+                report.routing_latency_micros.max,
+            );
+        }
         if !report.agent_route_distribution.is_empty() {
             println!(
                 "Routes (adaptive agent): {:?}",
@@ -285,7 +306,7 @@ pub(super) fn run_report(global: &GlobalArgs) -> Result<ExitCode, AppError> {
         println!("Feedback by repository:");
         for repository in &report.feedback_by_repository {
             println!(
-                "  {} [{}]: eligible={}, tuning={}, calibration={}, previews excluded={}",
+                "  {} [{}]: eligible={}, tuning={}, calibration={}, previews excluded={}, native-preserved excluded={}",
                 repository.repository_name,
                 repository.repository_identifier,
                 repository.eligible_feedback_count,
@@ -294,6 +315,7 @@ pub(super) fn run_report(global: &GlobalArgs) -> Result<ExitCode, AppError> {
                     .current_calibration
                     .map_or_else(|| "none".into(), |offset| format!("{offset:+}")),
                 repository.previews_excluded,
+                repository.native_preserved_excluded,
             );
         }
         println!(
@@ -386,6 +408,10 @@ pub(super) fn run_tune(global: &GlobalArgs, args: TuneArgs) -> Result<ExitCode, 
             tuning.feedback.failed_for_other_reason,
         );
         println!("Preview feedback excluded: {}", tuning.previews_excluded);
+        println!(
+            "Native-preserved feedback excluded: {}",
+            tuning.native_preserved_excluded
+        );
         println!(
             "Current calibration: {}",
             tuning

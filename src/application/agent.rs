@@ -8,16 +8,18 @@ use serde_json::{Value, json};
 use crate::app_server::{MessageInterceptor, ProcessConfig};
 use crate::cli::{AgentArgs, GlobalArgs, RouteArgs};
 use crate::codex::args::{ExplicitNativeOverrides, inspect_forwarded};
+use crate::codex::launch::InjectionPolicy;
 use crate::error::AppError;
-use crate::routing::{LaunchMode, ModelFamily, ReasoningLevel};
+use crate::routing::{
+    CapabilitySource, LaunchMode, ModelFamily, ReasoningLevel, RoutePreset, RouteSource,
+};
 use crate::state::{
     FeedbackKind, FeedbackSource, analyze_repository, append_feedback_for_decision, load_store,
     save_recommendation,
 };
 
 use super::decision::{DecisionLogInput, write as write_decision};
-use super::route::{ResolvedRoute, resolve_route};
-use super::{load_context_and_config, resolve_installation};
+use super::route::{PreparedRoute, ResolvedRoute, prepare_route, resolve_prepared};
 
 #[derive(Clone, Debug, Default)]
 struct ExplicitRoute {
@@ -38,6 +40,7 @@ struct ThreadState {
     repository_name: Option<String>,
     next_explicit_route: Option<ExplicitRoute>,
     feedback_recorded_for_decision: bool,
+    route_source: RouteSource,
 }
 
 struct PendingTurn {
@@ -49,9 +52,11 @@ struct AgentRouter {
     global: GlobalArgs,
     base_args: RouteArgs,
     native: ExplicitNativeOverrides,
+    prepared: PreparedRoute,
     threads: HashMap<String, ThreadState>,
     pending: HashMap<String, PendingTurn>,
     pending_resumes: HashMap<String, String>,
+    info_notifications: bool,
 }
 
 fn request_key(value: &Value) -> Option<String> {
@@ -68,6 +73,27 @@ fn warning(thread_id: Option<&str>, message: impl Into<String>) -> Value {
             "message": message.into(),
         }
     })
+}
+
+fn info(thread_id: Option<&str>, message: impl Into<String>, hint: impl Into<String>) -> Value {
+    json!({
+        "method": "info",
+        "params": {
+            "threadId": thread_id,
+            "message": message.into(),
+            "hint": hint.into(),
+        }
+    })
+}
+
+fn route_label(family: &ModelFamily, effort: ReasoningLevel) -> String {
+    let family = match family {
+        ModelFamily::Luna => "Luna",
+        ModelFamily::Terra => "Terra",
+        ModelFamily::Sol => "Sol",
+        ModelFamily::Other(_) => "Custom",
+    };
+    format!("{family} / {}", effort.display_name())
 }
 
 fn prompt_text(params: &Value) -> Option<String> {
@@ -208,15 +234,83 @@ fn rewrite_turn_params(
 }
 
 impl AgentRouter {
-    fn new(global: GlobalArgs, base_args: RouteArgs, native: ExplicitNativeOverrides) -> Self {
+    fn with_prepared(
+        global: GlobalArgs,
+        base_args: RouteArgs,
+        native: ExplicitNativeOverrides,
+        prepared: PreparedRoute,
+    ) -> Self {
         Self {
             global,
             base_args,
             native,
+            prepared,
             threads: HashMap::new(),
             pending: HashMap::new(),
             pending_resumes: HashMap::new(),
+            info_notifications: false,
         }
+    }
+
+    #[cfg(test)]
+    fn new(global: GlobalArgs, base_args: RouteArgs, native: ExplicitNativeOverrides) -> Self {
+        let prepared = PreparedRoute::for_tests(global.clone(), native.clone());
+        Self::with_prepared(global, base_args, native, prepared)
+    }
+
+    fn success_message(
+        &self,
+        thread_id: &str,
+        message: impl Into<String>,
+        hint: impl Into<String>,
+    ) -> Vec<Value> {
+        self.info_notifications
+            .then(|| info(Some(thread_id), message, hint))
+            .into_iter()
+            .collect()
+    }
+
+    fn preserve_native_route(resolved: &mut ResolvedRoute, params: &Value) -> bool {
+        let incoming = parse_explicit_route(params);
+        let Some(model_id) = incoming.model else {
+            return false;
+        };
+        let display_level = incoming
+            .effort
+            .or_else(|| {
+                resolved
+                    .catalog
+                    .find(&model_id)
+                    .and_then(|model| model.default_reasoning_effort.parse().ok())
+            })
+            .unwrap_or(ReasoningLevel::Medium);
+        let service_tier = params
+            .get("serviceTier")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let model_family = ModelFamily::from_model_id(&model_id);
+        resolved.plan.preset = RoutePreset {
+            model_id,
+            model_family,
+            display_level,
+            native_effort: Some(display_level.native_name().to_owned()),
+            collaboration_mode: None,
+            service_tier,
+            required_features: Vec::new(),
+            interactive_supported: true,
+            exec_supported: true,
+            source: CapabilitySource::AppServer,
+            fallback: None,
+        };
+        resolved.plan.downgrade = None;
+        resolved.policy = InjectionPolicy {
+            inject_model: false,
+            inject_effort: false,
+            inject_service_tier: false,
+        };
+        resolved.route_source = RouteSource::NativePreserved;
+        resolved.decision.ultra_selected = display_level == ReasoningLevel::Ultra;
+        true
     }
 
     fn record_feedback(
@@ -278,7 +372,8 @@ impl AgentRouter {
             )]);
         }
         let state = self.threads.entry(thread_id.to_owned()).or_default();
-        let feedback = (state.route_initialized
+        let feedback = (state.route_source != RouteSource::NativePreserved
+            && state.route_initialized
             && state.decision_id.is_some()
             && !state.feedback_recorded_for_decision)
             .then(|| {
@@ -305,6 +400,9 @@ impl AgentRouter {
                     .and_then(Value::as_str)
                     .map(str::to_owned);
             }
+            if explicit.model.is_some() || explicit.effort.is_some() {
+                state.route_source = RouteSource::Explicit;
+            }
         } else {
             state.next_explicit_route = Some(explicit);
         }
@@ -320,16 +418,11 @@ impl AgentRouter {
             FeedbackKind::Right | FeedbackKind::FailedForOtherReason => "different",
         };
         let messages = match calibration {
-            Ok(calibration) => {
-                let mut messages = vec![warning(
-                    Some(thread_id),
-                    format!("cauto learned from the explicit {direction} route selection"),
-                )];
-                if let Some(calibration) = calibration {
-                    messages.push(warning(Some(thread_id), format!("cauto: {calibration}")));
-                }
-                messages
-            }
+            Ok(calibration) => self.success_message(
+                thread_id,
+                format!("Routing learned from your {direction} selection"),
+                calibration.unwrap_or_else(|| "Applies to future threads".into()),
+            ),
             Err(error) => vec![warning(
                 Some(thread_id),
                 format!(
@@ -348,7 +441,6 @@ impl AgentRouter {
     ) -> Result<Vec<Value>, AppError> {
         let state = self.threads.entry(thread_id.to_owned()).or_default();
         let mut turn_args = self.base_args.clone();
-        turn_args.task = Some(OsString::from(&prompt));
         turn_args.prompt = None;
         turn_args.prompt_file = None;
         turn_args.stdin = false;
@@ -369,37 +461,37 @@ impl AgentRouter {
             turn_args.effort = Some(effort.native_name().into());
         }
 
-        let mut turn_global = self.global.clone();
-        if turn_global.repo.is_none()
-            && let Some(cwd) = request
-                .get("params")
-                .and_then(|params| params.get("cwd"))
-                .and_then(Value::as_str)
-        {
-            turn_global.repo = Some(cwd.into());
-        }
-        let resolved = resolve_route(
-            &turn_global,
+        let mut resolved = resolve_prepared(
+            &self.prepared,
             &turn_args,
+            super::prompt::PromptInput::from_text(prompt),
             LaunchMode::Interactive,
-            false,
-            true,
         )?;
-
-        let params = request
-            .get_mut("params")
-            .and_then(Value::as_object_mut)
-            .ok_or_else(|| AppError::AppServer("turn/start params were not an object".into()))?;
-        rewrite_turn_params(
-            params,
-            &resolved.plan.preset.model_id,
-            resolved.plan.preset.native_effort.as_deref(),
-            resolved.plan.preset.service_tier.as_deref(),
-        );
-        let selected = format!(
-            "{}/{}",
-            resolved.plan.preset.model_family,
-            resolved.plan.preset.display_level.native_name()
+        let params = request.get("params").unwrap_or(&Value::Null);
+        let prepared_root = self.prepared.context.repository.root.to_string_lossy();
+        let cwd_changed = params
+            .get("cwd")
+            .and_then(Value::as_str)
+            .is_some_and(|cwd| cwd != prepared_root);
+        let preserved = (!resolved.decisive_local_evidence || cwd_changed)
+            && Self::preserve_native_route(&mut resolved, params);
+        if !preserved {
+            let params = request
+                .get_mut("params")
+                .and_then(Value::as_object_mut)
+                .ok_or_else(|| {
+                    AppError::AppServer("turn/start params were not an object".into())
+                })?;
+            rewrite_turn_params(
+                params,
+                &resolved.plan.preset.model_id,
+                resolved.plan.preset.native_effort.as_deref(),
+                resolved.plan.preset.service_tier.as_deref(),
+            );
+        }
+        let selected = route_label(
+            &resolved.plan.preset.model_family,
+            resolved.plan.preset.display_level,
         );
         let key = request_key(request)
             .ok_or_else(|| AppError::AppServer("turn/start request had no id".into()))?;
@@ -410,10 +502,23 @@ impl AgentRouter {
                 resolved,
             },
         );
-        Ok(vec![warning(
-            Some(thread_id),
-            format!("cauto routed this session to {selected}; the route is pinned for this thread"),
-        )])
+        if preserved {
+            Ok(self.success_message(
+                thread_id,
+                format!("Native route kept · {selected}"),
+                if cwd_changed {
+                    "Repository changed after launch"
+                } else {
+                    "Not enough local evidence to override"
+                },
+            ))
+        } else {
+            Ok(self.success_message(
+                thread_id,
+                format!("Route set · {selected}"),
+                "Pinned for this thread",
+            ))
+        }
     }
 
     fn keep_session_route(
@@ -467,13 +572,17 @@ impl AgentRouter {
         if !service_tier_is_pinned && let Some(service_tier) = incoming_service_tier {
             state.service_tier = service_tier;
         }
-        let feedback = explicit_feedback
-            .map(|kind| (kind, FeedbackSource::ExplicitRouteChange))
-            .or_else(|| {
-                prompt
-                    .and_then(implicit_feedback)
-                    .map(|kind| (kind, FeedbackSource::ImplicitCorrection))
-            });
+        let feedback = if state.route_source == RouteSource::NativePreserved {
+            None
+        } else {
+            explicit_feedback
+                .map(|kind| (kind, FeedbackSource::ExplicitRouteChange))
+                .or_else(|| {
+                    prompt
+                        .and_then(implicit_feedback)
+                        .map(|kind| (kind, FeedbackSource::ImplicitCorrection))
+                })
+        };
         let feedback_result = feedback.map(|(kind, source)| {
             crate::paths::CautoPaths::discover()
                 .and_then(|paths| Self::record_feedback(state, &paths, kind, source))
@@ -501,10 +610,11 @@ impl AgentRouter {
         }
 
         match feedback_result {
-            Some(Ok(Some(calibration))) => Ok(vec![warning(
-                Some(thread_id),
-                format!("cauto learned from this correction for future sessions; {calibration}"),
-            )]),
+            Some(Ok(Some(calibration))) => Ok(self.success_message(
+                thread_id,
+                "Routing learned from this correction",
+                calibration,
+            )),
             Some(Err(error)) => Ok(vec![warning(
                 Some(thread_id),
                 format!(
@@ -520,6 +630,7 @@ impl AgentRouter {
         let incoming = parse_explicit_route(params);
         let state = self.threads.entry(thread_id.to_owned()).or_default();
         state.route_initialized = true;
+        state.route_source = RouteSource::NativePreserved;
         if let Some(model) = incoming.model {
             state.family = Some(ModelFamily::from_model_id(&model));
             state.model = Some(model);
@@ -532,10 +643,11 @@ impl AgentRouter {
             .get("serviceTier")
             .and_then(Value::as_str)
             .map(str::to_owned);
-        vec![warning(
-            Some(thread_id),
-            "cauto could not classify the initial non-text input; the native route is pinned for this thread",
-        )]
+        self.success_message(
+            thread_id,
+            "Native route kept",
+            "Non-text opening · pinned for this thread",
+        )
     }
 
     fn commit_turn(&mut self, key: &str, response: &Value) -> Result<Vec<Value>, AppError> {
@@ -557,8 +669,8 @@ impl AgentRouter {
             decision,
             plan,
             policy,
-            classifier_ran,
-            classifier_outcome,
+            route_source,
+            routing_elapsed_micros,
             ..
         } = pending.resolved;
         let decision_result = write_decision(DecisionLogInput {
@@ -569,8 +681,8 @@ impl AgentRouter {
             decision: &decision,
             plan: &plan,
             policy,
-            classifier_ran,
-            classifier_outcome: &classifier_outcome,
+            route_source,
+            routing_elapsed_micros,
             decision_mode: "agent",
             strict: loaded.config.strict_logging,
             quiet: self.global.quiet,
@@ -600,6 +712,7 @@ impl AgentRouter {
         ));
         state.repository_name = Some(context.repository.name);
         state.feedback_recorded_for_decision = false;
+        state.route_source = route_source;
         Ok(logging_warning.into_iter().collect())
     }
 
@@ -617,6 +730,7 @@ impl AgentRouter {
             .and_then(|value| ReasoningLevel::from_str(value).ok());
         let state = self.threads.entry(thread_id.to_owned()).or_default();
         state.route_initialized = true;
+        state.route_source = RouteSource::NativePreserved;
         if let Some(model) = model {
             state.family = Some(ModelFamily::from_model_id(model));
             state.model = Some(model.to_owned());
@@ -633,8 +747,25 @@ impl AgentRouter {
 }
 
 impl MessageInterceptor for AgentRouter {
+    fn negotiated(
+        &mut self,
+        capabilities: &crate::app_server::NegotiatedCapabilities,
+    ) -> Result<(), AppError> {
+        self.prepared.catalog = capabilities.model_catalog.clone();
+        Ok(())
+    }
+
     fn client_message(&mut self, message: &mut Value) -> Result<Vec<Value>, AppError> {
         let method = message.get("method").and_then(Value::as_str);
+        if method == Some("initialize") {
+            self.info_notifications = message
+                .get("params")
+                .and_then(|params| params.get("capabilities"))
+                .and_then(|capabilities| capabilities.get("infoNotifications"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            return Ok(Vec::new());
+        }
         if method == Some("thread/resume")
             && let (Some(key), Some(thread_id)) = (
                 request_key(message),
@@ -745,21 +876,21 @@ pub(super) fn run(global: &GlobalArgs, args: AgentArgs) -> Result<ExitCode, AppE
     let route: RouteArgs = args.route.clone().into();
     let initial_prompt = super::prompt::acquire(&route, LaunchMode::Interactive)?.original;
     let native = inspect_forwarded(&route.forwarded)?;
-    let (context, _, _) = load_context_and_config(global, Some(&route))?;
-    let installation = resolve_installation(global, &native)?;
     let mut base_args = route;
     base_args.task = None;
     base_args.prompt = None;
     base_args.prompt_file = None;
     base_args.stdin = false;
-    let mut router = AgentRouter::new(global.clone(), base_args, native);
+    let prepared = prepare_route(global, &base_args, true)?;
     let config = ProcessConfig {
-        binary: installation.binary,
-        working_directory: context.repository.root,
-        profile: installation.profile,
+        binary: prepared.installation.binary.clone(),
+        working_directory: prepared.context.repository.root.clone(),
+        profile: prepared.installation.profile.clone(),
         tui_args: tui_args(&args, initial_prompt),
         verbose: global.verbose,
+        codex_version: prepared.catalog.codex_version.clone(),
     };
+    let mut router = AgentRouter::with_prepared(global.clone(), base_args, native, prepared);
     let (exit, capabilities) = crate::app_server::run(config, &mut router)?;
     if global.verbose {
         eprintln!(
@@ -820,8 +951,10 @@ mod tests {
             selected_effort: ReasoningLevel::Medium,
             ultra_candidate: false,
             ultra_selected: false,
+            route_source: crate::routing::RouteSource::Local,
+            routing_elapsed_micros: 0,
             classifier_ran: false,
-            classifier_outcome: "skipped".into(),
+            classifier_outcome: String::new(),
             catalog_source: CapabilitySource::Cache,
             downgrade: None,
             sanitized_argv: Vec::new(),
@@ -884,6 +1017,103 @@ mod tests {
             ]
         });
         assert_eq!(prompt_text(&params).as_deref(), Some("first\nsecond"));
+    }
+
+    fn enable_info_notifications(router: &mut AgentRouter) {
+        let mut initialize = json!({
+            "id": "initialize",
+            "method": "initialize",
+            "params": {
+                "capabilities": { "infoNotifications": true }
+            }
+        });
+        assert!(router.client_message(&mut initialize).unwrap().is_empty());
+    }
+
+    #[test]
+    fn decisive_first_turn_is_routed_locally_and_explained_as_info() {
+        let mut router = AgentRouter::new(
+            GlobalArgs {
+                repo: None,
+                codex_bin: None,
+                profile: None,
+                json: false,
+                verbose: false,
+                quiet: false,
+                no_color: false,
+            },
+            RouteArgs::default(),
+            ExplicitNativeOverrides::default(),
+        );
+        enable_info_notifications(&mut router);
+        let mut turn = json!({
+            "id": "turn-local",
+            "method": "turn/start",
+            "params": {
+                "threadId": "thread-local",
+                "model": "gpt-5.6-sol",
+                "effort": "xhigh",
+                "input": [{
+                    "type": "text",
+                    "text": "what is this project? explain to me like im 5"
+                }]
+            }
+        });
+
+        let messages = router.client_message(&mut turn).unwrap();
+        assert_eq!(turn["params"]["model"], "gpt-5.6-luna");
+        assert_eq!(turn["params"]["effort"], "low");
+        assert_eq!(messages[0]["method"], "info");
+        assert_eq!(messages[0]["params"]["message"], "Route set · Luna / Low");
+        assert_eq!(
+            router.pending["\"turn-local\""].resolved.route_source,
+            RouteSource::Local
+        );
+    }
+
+    #[test]
+    fn ambiguous_first_turn_preserves_native_route_and_explains_why() {
+        let mut router = AgentRouter::new(
+            GlobalArgs {
+                repo: None,
+                codex_bin: None,
+                profile: None,
+                json: false,
+                verbose: false,
+                quiet: false,
+                no_color: false,
+            },
+            RouteArgs::default(),
+            ExplicitNativeOverrides::default(),
+        );
+        enable_info_notifications(&mut router);
+        let mut turn = json!({
+            "id": "turn-native",
+            "method": "turn/start",
+            "params": {
+                "threadId": "thread-native",
+                "model": "gpt-5.6-sol",
+                "effort": "xhigh",
+                "input": [{ "type": "text", "text": "please help me with these widgets" }]
+            }
+        });
+
+        let messages = router.client_message(&mut turn).unwrap();
+        assert_eq!(turn["params"]["model"], "gpt-5.6-sol");
+        assert_eq!(turn["params"]["effort"], "xhigh");
+        assert_eq!(messages[0]["method"], "info");
+        assert_eq!(
+            messages[0]["params"]["message"],
+            "Native route kept · Sol / Extra High"
+        );
+        assert_eq!(
+            messages[0]["params"]["hint"],
+            "Not enough local evidence to override"
+        );
+        assert_eq!(
+            router.pending["\"turn-native\""].resolved.route_source,
+            RouteSource::NativePreserved
+        );
     }
 
     #[test]
@@ -1061,6 +1291,14 @@ mod tests {
             RouteArgs::default(),
             ExplicitNativeOverrides::default(),
         );
+        let mut initialize = json!({
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "capabilities": { "infoNotifications": true }
+            }
+        });
+        assert!(router.client_message(&mut initialize).unwrap().is_empty());
         let mut turn = json!({
             "id": 12,
             "method": "turn/start",
@@ -1073,6 +1311,8 @@ mod tests {
         });
         let messages = router.client_message(&mut turn).unwrap();
         assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["method"], "info");
+        assert_eq!(messages[0]["params"]["message"], "Native route kept");
         let state = router.threads.get("thread-1").unwrap();
         assert!(state.route_initialized);
         assert_eq!(state.model.as_deref(), Some("gpt-5.6-terra"));

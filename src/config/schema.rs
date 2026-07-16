@@ -2,15 +2,15 @@ use std::num::NonZeroU64;
 
 use serde::Deserialize;
 
-use crate::routing::{
-    ClassifierMode, DimensionDeltas, FastMode, ModelFamily, ReasoningLevel, RuleSource, Weights,
-};
+use crate::routing::{DimensionDeltas, FastMode, ModelFamily, ReasoningLevel, RuleSource, Weights};
 
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct RawConfig {
     pub version: Option<u32>,
-    pub classifier: Option<String>,
-    pub classifier_confidence_threshold: Option<f64>,
+    #[serde(rename = "classifier")]
+    pub legacy_classifier: Option<String>,
+    #[serde(rename = "classifier_confidence_threshold")]
+    pub legacy_classifier_confidence_threshold: Option<f64>,
     pub default_model: Option<String>,
     pub default_effort: Option<String>,
     pub fast_mode: Option<String>,
@@ -21,7 +21,8 @@ pub struct RawConfig {
     pub catalog_cache_hours: Option<u64>,
     pub git_timeout_ms: Option<u64>,
     pub catalog_timeout_ms: Option<u64>,
-    pub classifier_timeout_seconds: Option<u64>,
+    #[serde(rename = "classifier_timeout_seconds")]
+    pub legacy_classifier_timeout_seconds: Option<u64>,
     pub hysteresis_points: Option<u8>,
     #[serde(default)]
     pub weights: RawWeights,
@@ -150,8 +151,6 @@ pub struct ValidatedRule {
 
 #[derive(Clone, Debug)]
 pub struct ValidatedConfig {
-    pub classifier: ClassifierMode,
-    pub classifier_confidence_threshold_basis_points: u16,
     pub default_model: String,
     pub default_effort: ReasoningLevel,
     pub fast_mode: FastMode,
@@ -161,7 +160,6 @@ pub struct ValidatedConfig {
     pub catalog_cache_hours: NonZeroU64,
     pub git_timeout: TimeoutMillis,
     pub catalog_timeout: TimeoutMillis,
-    pub classifier_timeout: TimeoutMillis,
     pub hysteresis_points: u8,
     pub weights: Weights,
     pub rules: Vec<ValidatedRule>,
@@ -170,10 +168,6 @@ pub struct ValidatedConfig {
 impl Default for ValidatedConfig {
     fn default() -> Self {
         Self {
-            // Use Luna only when the deterministic path has no semantic evidence. Recognized
-            // tasks remain on the zero-subprocess fast path, and --no-classifier is a hard opt-out.
-            classifier: ClassifierMode::Auto,
-            classifier_confidence_threshold_basis_points: 7_200,
             default_model: "gpt-5.6-sol".into(),
             default_effort: ReasoningLevel::Medium,
             fast_mode: FastMode::Inherit,
@@ -183,7 +177,6 @@ impl Default for ValidatedConfig {
             catalog_cache_hours: NonZeroU64::new(12).expect("non-zero default"),
             git_timeout: TimeoutMillis::new(250).expect("non-zero default"),
             catalog_timeout: TimeoutMillis::new(2_500).expect("non-zero default"),
-            classifier_timeout: TimeoutMillis::new(45_000).expect("non-zero default"),
             // Separate one-shot launcher invocations are separate tasks. Cross-turn hysteresis
             // belongs in the future thread-aware agent, not repository-global history.
             hysteresis_points: 0,

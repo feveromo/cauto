@@ -12,7 +12,8 @@ use cauto::codex::binary::{
 };
 use cauto::codex::capabilities::{PresetRequest, resolve_preset};
 use cauto::codex::catalog::{
-    CachedCatalogSource, CatalogManager, CatalogRequest, CatalogSource, parse_debug_models,
+    CachedCatalogSource, CatalogManager, CatalogRequest, CatalogSource, parse_app_server_models,
+    parse_debug_models,
 };
 use cauto::codex::version;
 use cauto::paths::CautoPaths;
@@ -101,6 +102,48 @@ fn debug_catalog_accepts_additive_unknown_fields() {
     assert_eq!(catalog.models.len(), 4);
     assert!(catalog.models[0].ultra_available());
     assert!(!catalog.models[2].ultra_available());
+}
+
+#[test]
+fn app_server_catalog_uses_live_interactive_capabilities() {
+    let catalog = parse_app_server_models(
+        serde_json::json!({
+            "data": [{
+                "id": "gpt-5.6-luna",
+                "model": "gpt-5.6-luna",
+                "displayName": "Luna",
+                "description": "Fast local work",
+                "hidden": false,
+                "supportedReasoningEfforts": [
+                    { "reasoningEffort": "low", "description": "Fast" },
+                    { "reasoningEffort": "medium", "description": "Balanced" }
+                ],
+                "defaultReasoningEffort": "low",
+                "inputModalities": ["text", "image"],
+                "additionalSpeedTiers": ["priority"],
+                "serviceTiers": [{
+                    "id": "priority",
+                    "name": "Fast",
+                    "description": "Low latency"
+                }],
+                "isDefault": false,
+                "futureField": true
+            }]
+        }),
+        "codex-cli 0.144.5",
+    )
+    .unwrap();
+
+    assert_eq!(catalog.source, CapabilitySource::AppServer);
+    assert_eq!(catalog.codex_version, "codex-cli 0.144.5");
+    let model = catalog.find("gpt-5.6-luna").unwrap();
+    assert_eq!(model.family, ModelFamily::Luna);
+    assert_eq!(model.default_reasoning_effort, "low");
+    assert!(model.supports_effort("medium"));
+    assert_eq!(model.service_tiers[0].id, "priority");
+    assert!(model.interactive_supported);
+    assert!(!model.exec_supported);
+    assert!(model.app_server_only);
 }
 
 #[test]

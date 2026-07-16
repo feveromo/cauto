@@ -331,6 +331,80 @@ pub fn parse_debug_models(
     })
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AppServerModelList {
+    data: Vec<AppServerModel>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AppServerModel {
+    id: String,
+    display_name: String,
+    default_reasoning_effort: String,
+    supported_reasoning_efforts: Vec<AppServerEffort>,
+    #[serde(default)]
+    service_tiers: Vec<ServiceTier>,
+    #[serde(default)]
+    additional_speed_tiers: Vec<String>,
+    #[serde(default)]
+    input_modalities: Vec<String>,
+    hidden: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AppServerEffort {
+    reasoning_effort: String,
+}
+
+/// Parses the live App Server model list used by adaptive-agent routing.
+pub fn parse_app_server_models(
+    value: serde_json::Value,
+    codex_version: &str,
+) -> Result<ModelCatalog, CatalogError> {
+    let raw: AppServerModelList =
+        serde_json::from_value(value).map_err(|error| CatalogError::Parse(error.to_string()))?;
+    if raw.data.is_empty() {
+        return Err(CatalogError::Parse(
+            "App Server model list contains no models".into(),
+        ));
+    }
+    let models = raw
+        .data
+        .into_iter()
+        .map(|model| ModelCapability {
+            family: ModelFamily::from_model_id(&model.id),
+            id: model.id,
+            display_name: model.display_name,
+            default_reasoning_effort: model.default_reasoning_effort,
+            supported_reasoning_efforts: model
+                .supported_reasoning_efforts
+                .into_iter()
+                .map(|effort| effort.reasoning_effort)
+                .collect(),
+            service_tiers: model.service_tiers,
+            additional_speed_tiers: model.additional_speed_tiers,
+            input_modalities: model.input_modalities,
+            hidden: model.hidden,
+            supported_in_api: true,
+            interactive_supported: true,
+            exec_supported: false,
+            app_server_only: true,
+        })
+        .collect();
+    Ok(ModelCatalog {
+        models,
+        source: CapabilitySource::AppServer,
+        stale: false,
+        fetched_at_unix: unix_now(),
+        cache_age_seconds: None,
+        codex_version: codex_version.to_owned(),
+        warning: None,
+    })
+}
+
 fn fallback_model(id: &str, family: ModelFamily) -> ModelCapability {
     ModelCapability {
         id: id.into(),

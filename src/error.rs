@@ -45,8 +45,6 @@ pub enum AppError {
     PresetUnavailable(String),
     #[error("explicit downgrade refused: {0}; pass --allow-downgrade to permit a fallback")]
     ExplicitDowngradeRefused(String),
-    #[error("classifier failed: {0}")]
-    Classifier(String),
     #[error("Codex App Server failure: {0}")]
     AppServer(String),
     #[error("cache failure at {path}: {message}")]
@@ -82,7 +80,6 @@ impl AppError {
             | Self::CatalogDiscovery(_)
             | Self::CatalogParse(_) => 4,
             Self::PresetUnavailable(_) | Self::ExplicitDowngradeRefused(_) => 5,
-            Self::Classifier(_) => 6,
             Self::AppServer(_) => 8,
             Self::Cache { .. } | Self::State { .. } | Self::Serialization(_) => 7,
             Self::LaunchFailed { .. } => 8,

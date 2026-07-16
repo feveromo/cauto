@@ -13,16 +13,15 @@ prompt argv
   -> compiled phrase/path policy evidence
   -> optional bounded repository calibration value
   -> pure fixed-point route
-  -> optional isolated classifier blend
   -> fingerprinted installed-catalog resolution
   -> redacted locked decision append
   -> argv LaunchPlan
   -> native Unix exec
 ```
 
-No repository recursion, model inference, network client, async runtime, or
-Codex subprocess is present on a warm deterministic `--no-classifier` route.
-Git is the only optional pre-launch subprocess and is bounded by one command.
+No repository recursion, model inference, network client, or async runtime is
+present in routing. Git is the only optional pre-launch subprocess and is
+bounded by one command.
 
 The adaptive path keeps the same routing pipeline but places it inside a
 loopback WebSocket relay:
@@ -33,9 +32,10 @@ native Codex TUI
   <-> native Codex App Server
 ```
 
-The relay rewrites the selected model/effort at each text turn boundary and
-forwards every other request, response, notification, stream frame, approval,
-input, resize, interrupt, cancel, ping, and close frame unchanged.
+The relay may rewrite the selected model/effort at the first text turn boundary,
+pins that route for the thread, and forwards every other request, response,
+notification, stream frame, approval, input, resize, interrupt, cancel, ping,
+and close frame unchanged.
 
 ## Configuration And Policy
 
@@ -77,11 +77,11 @@ the uncalibrated score. Explicit choices and policy constraints are applied at
 their normal higher-authority boundaries. Preview decisions are excluded from
 both prior-route lookup and tuning evidence.
 
-Classifier output is strictly bounded semantic evidence. It can raise a
-dimension that deterministic phrase matching missed but cannot lower any
-deterministic or policy evidence. The same floors, ceilings, and Ultra gate are
-reapplied. Task categories are typed and documentation/mechanical categories
-recognized deterministically cannot be overwritten by the classifier.
+Application orchestration marks whether the local route has decisive evidence.
+Typed task recognition, escalation signals, explicit paths or completion
+criteria, matched policy, and explicit model/effort choices are decisive. An
+unrecognized generic prompt is not: adaptive mode preserves the incoming native
+Codex route instead of allowing the generic baseline to masquerade as evidence.
 
 ## Catalog And Cache
 
@@ -109,26 +109,23 @@ literal `max` or `ultra` through the installed catalog. Unsupported automatic
 routes downgrade visibly. Unsupported explicit routes fail unless
 `--allow-downgrade` is present.
 
-## Classifier Boundary
+## Prepared First-Turn Boundary
 
-The optional Luna classifier runs only through native `codex exec`; it is not
-an API client. The child receives `CAUTO_CLASSIFIER=1`, uses a fresh private
-directory, read-only sandbox, ephemeral session, low effort, schema path, and
-bounded prompt metadata. Unix assigns a process group so timeout terminates and
-reaps descendants. Temporary files are removed on every return path.
-Automatic mode considers only low-confidence tasks for which deterministic
-features, signals, and policy rules supplied no semantic evidence. Recognized
-tasks remain on the no-child fast path. `always` can explicitly override this
-gate, while `never`, `--no-classifier`, and offline mode are hard opt-outs.
-Preview modes suppress this child by default and expose `--run-classifier` as
-an explicit quota-spending opt-in.
+Adaptive startup resolves repository and AGENTS metadata, typed configuration,
+calibration, Codex installation, model capabilities, and compiled policy before
+the TUI accepts a prompt. The live App Server catalog replaces the prepared
+fallback/cache catalog during negotiation. A first `turn/start` therefore does
+only prompt normalization, local feature extraction, compiled-rule evaluation,
+fixed-point selection, capability lookup, and JSON field rewriting in memory.
+No child process, Git query, filesystem scan, or network operation begins after
+Enter. Later turns reuse the pin without running even that local pipeline.
 
 ## Feedback And Calibration State
 
 Decision and feedback JSONL remains append-only and redacted. Tuning analysis
-joins feedback to its decision ID, excludes preview-linked events, ignores
-diagnostic failures for eligibility, requires three routing outcomes, and
-requires a 70% directional signal. The recommendation is a conservative target
+joins feedback to its decision ID, excludes preview-linked and native-preserved
+events, ignores diagnostic failures for eligibility, requires three routing
+outcomes, and requires a 70% directional signal. The recommendation is a conservative target
 offset of +5 or -5 points. Manual analysis remains read-only until
 `cauto tune --apply`; adaptive agent corrections apply an eligible
 recommendation automatically.
@@ -137,10 +134,9 @@ Agent feedback accepts only explicit model/effort route changes and
 high-precision correction/overkill language. It never infers success from
 silence, duration, tokens, prompt length, or tool count. Feedback can update
 bounded repository calibration for later sessions, but it never reroutes the
-current thread. A concentration of launched decisions at the unresolved
-generic baseline without successful semantic classification is reported
-directly and should trigger a feature/classifier correction rather than
-repetitive user feedback.
+current thread. A concentration of locally launched decisions at the unresolved
+generic baseline is reported directly and should trigger a deterministic
+feature or policy correction rather than repetitive user feedback.
 
 Applied calibration uses a separate versioned
 `~/.local/state/cauto/calibration.json` store keyed only by repository hash.
@@ -176,12 +172,16 @@ Only the first client `turn/start` text request for a new thread is routed and
 logged, after App Server accepts it. Both top-level model/effort and
 authoritative `collaborationMode.settings` are rewritten, then the exact model,
 native effort, and service tier are pinned for later turns without invoking the
-router or classifier again. A later native turn setting that differs from the
+router again. A later native turn setting that differs from the
 pin is treated as an explicit user route change and becomes the new pin;
 `thread/resume` responses restore and pin the stored route. Clear corrections
 are feedback for future sessions, not triggers for a same-thread route change.
-If initial routing fails, the untouched native request is forwarded with a
-warning instead of blocking the session.
+The real request/response is relayed before cosmetic routing messages or
+decision logging. If local evidence is insufficient, the untouched native route
+is pinned. If routing fails, the untouched native request is forwarded with a
+warning instead of blocking the session. Successful route choices are emitted
+only as an `info` notification when the TUI advertises support; older clients
+remain silent, while actual failures retain warning severity.
 
 Child guards terminate and reap the App Server and TUI on every return path.
 The relay binds only `127.0.0.1`, inherits the native TUI's stdio, sandbox,

@@ -97,16 +97,32 @@ pub fn extract_features(prompt: &str) -> FeatureAssessment {
             "provided",
         ],
     );
-    let docs = contains_any(
+    let project_explanation = contains_any(
         &normalized,
         &[
-            "documentation",
-            "readme",
-            "markdown",
-            "fix typo",
-            "spelling",
+            "what is this project",
+            "what does this project do",
+            "explain this project",
+            "explain the project",
+            "explain this codebase",
+            "how does this project work",
+            "project overview",
+            "explain to me like",
+            "explain it like i'm",
+            "explain it like im",
         ],
     );
+    let docs = project_explanation
+        || contains_any(
+            &normalized,
+            &[
+                "documentation",
+                "readme",
+                "markdown",
+                "fix typo",
+                "spelling",
+            ],
+        );
     let mechanical = contains_any(
         &normalized,
         &[
@@ -516,6 +532,21 @@ mod tests {
         let assessment = extract_features("");
         assert_eq!(assessment.task_type, TaskType::Empty);
         assert!(assessment.vague_prompt);
+    }
+
+    #[test]
+    fn project_explanation_is_recognized_locally_as_luna_work() {
+        let assessment = extract_features("what is this project? explain to me like im 5");
+        assert_eq!(assessment.task_type, TaskType::Documentation);
+        let decision = route_for("what is this project? explain to me like im 5");
+        assert_eq!(
+            decision.recommended_family,
+            crate::routing::ModelFamily::Luna
+        );
+        assert_eq!(
+            decision.recommended_effort,
+            crate::routing::ReasoningLevel::Low
+        );
     }
 
     #[test]

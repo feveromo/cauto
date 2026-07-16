@@ -30,10 +30,10 @@ impl RawConfig {
         rules.append(&mut higher.rules);
         Self {
             version: choose(self.version, higher.version),
-            classifier: choose(self.classifier, higher.classifier),
-            classifier_confidence_threshold: choose(
-                self.classifier_confidence_threshold,
-                higher.classifier_confidence_threshold,
+            legacy_classifier: choose(self.legacy_classifier, higher.legacy_classifier),
+            legacy_classifier_confidence_threshold: choose(
+                self.legacy_classifier_confidence_threshold,
+                higher.legacy_classifier_confidence_threshold,
             ),
             default_model: choose(self.default_model, higher.default_model),
             default_effort: choose(self.default_effort, higher.default_effort),
@@ -48,9 +48,9 @@ impl RawConfig {
             catalog_cache_hours: choose(self.catalog_cache_hours, higher.catalog_cache_hours),
             git_timeout_ms: choose(self.git_timeout_ms, higher.git_timeout_ms),
             catalog_timeout_ms: choose(self.catalog_timeout_ms, higher.catalog_timeout_ms),
-            classifier_timeout_seconds: choose(
-                self.classifier_timeout_seconds,
-                higher.classifier_timeout_seconds,
+            legacy_classifier_timeout_seconds: choose(
+                self.legacy_classifier_timeout_seconds,
+                higher.legacy_classifier_timeout_seconds,
             ),
             hysteresis_points: choose(self.hysteresis_points, higher.hysteresis_points),
             weights: self.weights.merge(higher.weights),

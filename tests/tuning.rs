@@ -4,7 +4,7 @@ use std::ffi::OsString;
 
 use cauto::routing::{
     BoundedScore, CapabilitySource, Conflict, DimensionScores, ModelFamily, ReasoningLevel,
-    TaskType,
+    RouteSource, TaskType,
 };
 use cauto::state::decision_log::{
     DecisionRecord, append_json_line, prompt_sha256, repository_identifier, timestamp_now,
@@ -53,6 +53,8 @@ fn decision(id: &str, repository_id: &str, preview: bool) -> DecisionRecord {
         selected_effort: ReasoningLevel::Medium,
         ultra_candidate: false,
         ultra_selected: false,
+        route_source: RouteSource::Local,
+        routing_elapsed_micros: 100,
         classifier_ran: false,
         classifier_outcome: "skipped".into(),
         catalog_source: CapabilitySource::Cache,
@@ -158,6 +160,12 @@ fn previews_and_diagnostic_failures_do_not_tune() {
     for _ in 0..3 {
         append_feedback(&path, "preview", "repo", "underpowered");
     }
+    let mut native = decision("native", "repo", false);
+    native.route_source = RouteSource::NativePreserved;
+    append_json_line(&path, &serde_json::to_vec(&native).unwrap()).unwrap();
+    for _ in 0..3 {
+        append_feedback(&path, "native", "repo", "underpowered");
+    }
     append_json_line(
         &path,
         &serde_json::to_vec(&decision("real", "repo", false)).unwrap(),
@@ -174,6 +182,7 @@ fn previews_and_diagnostic_failures_do_not_tune() {
     .unwrap();
     let tuning = &analysis.repositories[0];
     assert_eq!(tuning.previews_excluded, 3);
+    assert_eq!(tuning.native_preserved_excluded, 3);
     assert_eq!(tuning.eligible_feedback_count, 0);
     assert_eq!(tuning.feedback.failed_for_other_reason, 3);
     assert!(!tuning.eligible);
@@ -256,7 +265,6 @@ fn tune_cli_is_read_only_then_apply_and_reset_are_repository_scoped() {
             repository.to_str().unwrap(),
             "--codex-bin",
             codex.to_str().unwrap(),
-            "--no-classifier",
             "--dry-run",
             "--json",
             "investigate a bounded bug",
@@ -276,7 +284,6 @@ fn tune_cli_is_read_only_then_apply_and_reset_are_repository_scoped() {
             repository.to_str().unwrap(),
             "--codex-bin",
             codex.to_str().unwrap(),
-            "--no-classifier",
             "--dry-run",
             "investigate a bounded bug",
         ])
@@ -304,7 +311,6 @@ fn tune_cli_is_read_only_then_apply_and_reset_are_repository_scoped() {
             repository.to_str().unwrap(),
             "--codex-bin",
             codex.to_str().unwrap(),
-            "--no-classifier",
             "--dry-run",
             "--json",
             "investigate a bounded bug",
@@ -335,7 +341,6 @@ fn malformed_calibration_does_not_block_cli_routing() {
             repository.to_str().unwrap(),
             "--codex-bin",
             codex.to_str().unwrap(),
-            "--no-classifier",
             "--dry-run",
             "--json",
             "investigate a bounded bug",

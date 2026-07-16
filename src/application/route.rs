@@ -2,8 +2,8 @@ use std::collections::HashSet;
 use std::ffi::OsString;
 use std::process::ExitCode;
 use std::str::FromStr;
+use std::time::Instant;
 
-use crate::classifier;
 use crate::cli::{GlobalArgs, RouteArgs};
 use crate::codex::args::{ExplicitNativeOverrides, inspect_forwarded};
 use crate::codex::capabilities::{PresetRequest, resolve_preset};
@@ -11,8 +11,8 @@ use crate::codex::launch::{InjectionPolicy, materialize_args, preview};
 use crate::error::AppError;
 use crate::output;
 use crate::routing::{
-    CapabilitySource, ClassifierMode, Confidence, EvidenceQuality, FastMode, LaunchMode,
-    LaunchPlan, ModelFamily, Reason, ReasoningLevel, RuleSource, TaskType, extract_features, route,
+    CapabilitySource, EvidenceQuality, FastMode, LaunchMode, LaunchPlan, ModelFamily, Reason,
+    ReasoningLevel, RouteSource, RuleSource, SelectionConstraints, extract_features, route,
 };
 
 use super::decision::{DecisionLogInput, write as write_decision};
@@ -28,8 +28,79 @@ pub(super) struct ResolvedRoute {
     pub decision: crate::routing::RouteDecision,
     pub plan: LaunchPlan,
     pub policy: InjectionPolicy,
-    pub classifier_ran: bool,
-    pub classifier_outcome: String,
+    pub route_source: RouteSource,
+    pub routing_elapsed_micros: u64,
+    pub decisive_local_evidence: bool,
+}
+
+/// Repository and capability state prepared before an adaptive-agent prompt is submitted.
+pub(super) struct PreparedRoute {
+    global: GlobalArgs,
+    native: ExplicitNativeOverrides,
+    pub(super) context: crate::context::ContextSnapshot,
+    loaded: crate::config::LoadedConfig,
+    paths: crate::paths::CautoPaths,
+    pub(super) installation: crate::codex::CodexInstallation,
+    pub(super) catalog: crate::codex::catalog::ModelCatalog,
+    compiled: crate::routing::CompiledRules,
+    base_constraints: SelectionConstraints,
+}
+
+#[cfg(test)]
+impl PreparedRoute {
+    pub(super) fn for_tests(global: GlobalArgs, native: ExplicitNativeOverrides) -> Self {
+        let root = std::path::PathBuf::from("/cauto-test-repository");
+        let catalog = crate::codex::catalog::parse_debug_models(
+            include_bytes!("../../tests/fixtures/catalog.json"),
+            CapabilitySource::DebugModels,
+            "codex-cli test",
+        )
+        .expect("test catalog is valid");
+        Self {
+            global,
+            native,
+            context: crate::context::ContextSnapshot {
+                repository: crate::context::RepositoryContext {
+                    root: root.clone(),
+                    name: "cauto-test-repository".into(),
+                    working_directory: root.clone(),
+                    relative_working_directory: std::path::PathBuf::new(),
+                    top_level_names: Vec::new(),
+                    has_git: false,
+                },
+                git: crate::context::GitContext {
+                    branch: None,
+                    state: crate::context::GitState::NotRepository,
+                    warning: None,
+                },
+                agents: crate::context::AgentsContext::default(),
+            },
+            loaded: crate::config::LoadedConfig {
+                config: crate::config::ValidatedConfig::default(),
+                user_path: root.join("config.toml"),
+                project_path: None,
+                user_loaded: false,
+                project_loaded: false,
+            },
+            paths: crate::paths::CautoPaths {
+                config_dir: root.join("config"),
+                cache_dir: root.join("cache"),
+                state_dir: root.join("state"),
+            },
+            installation: crate::codex::CodexInstallation {
+                binary: "/fake/codex".into(),
+                canonical_binary: "/fake/codex".into(),
+                fingerprint: "test".into(),
+                codex_home: root.join("codex-home"),
+                codex_home_hash: "test".into(),
+                profile: None,
+            },
+            catalog,
+            compiled: crate::routing::CompiledRules::new(Vec::new())
+                .expect("empty test rules compile"),
+            base_constraints: SelectionConstraints::default(),
+        }
+    }
 }
 
 fn effective_fast(args: &RouteArgs, config: &crate::config::LoadedConfig) -> FastMode {
@@ -41,16 +112,6 @@ fn effective_fast(args: &RouteArgs, config: &crate::config::LoadedConfig) -> Fas
         FastMode::Inherit
     } else {
         config.config.fast_mode
-    }
-}
-
-fn effective_classifier(args: &RouteArgs, config: &crate::config::LoadedConfig) -> ClassifierMode {
-    if args.no_classifier {
-        ClassifierMode::Never
-    } else if let Some(value) = &args.classifier {
-        ClassifierMode::from_str(value).expect("clap validated classifier mode")
-    } else {
-        config.config.classifier
     }
 }
 
@@ -100,13 +161,11 @@ fn reconcile_explicit(args: &RouteArgs, native: &ExplicitNativeOverrides) -> Res
     Ok(())
 }
 
-pub(super) fn resolve_route(
+pub(super) fn prepare_route(
     global: &GlobalArgs,
     args: &RouteArgs,
-    mode: LaunchMode,
-    explain: bool,
     agent_session: bool,
-) -> Result<ResolvedRoute, AppError> {
+) -> Result<PreparedRoute, AppError> {
     if args
         .forwarded
         .first()
@@ -117,37 +176,31 @@ pub(super) fn resolve_route(
             "the one-shot launcher does not reroute resumed sessions; use `cauto agent --resume THREAD_ID` or native `codex resume`".into(),
         ));
     }
-    let prompt = prompt::acquire(args, mode)?;
     let native = inspect_forwarded(&args.forwarded)?;
     reconcile_explicit(args, &native)?;
     let (context, loaded, paths) = load_context_and_config(global, Some(args))?;
     let installation = resolve_installation(global, &native)?;
     let catalog = catalog_for(&paths, &loaded, &installation, false, args.offline)?;
-    let features = extract_features(&prompt.analysis);
     let compiled = crate::routing::CompiledRules::new(loaded.config.rules.clone())?;
-    let applied = compiled.evaluate(
-        &features.normalized,
-        &features.explicit_paths,
-        features.dimensions,
-    );
-    let mut constraints = applied.constraints;
-    constraints.hysteresis_points = loaded.config.hysteresis_points;
     let repository_id = crate::state::repository_identifier(&context.repository.root);
+    let mut base_constraints = SelectionConstraints {
+        hysteresis_points: loaded.config.hysteresis_points,
+        ..SelectionConstraints::default()
+    };
     match crate::state::load_calibration(&paths.calibration(), &repository_id) {
-        Ok(Some(calibration)) => constraints.calibration = calibration,
+        Ok(Some(calibration)) => base_constraints.calibration = calibration,
         Ok(None) => {}
         Err(error) => {
-            // Calibration is optional state and must never block baseline routing.
             if global.verbose {
                 eprintln!("cauto: calibration unavailable; using baseline routing: {error}");
             }
         }
     }
-    if !agent_session && constraints.hysteresis_points > 0 {
+    if !agent_session && base_constraints.hysteresis_points > 0 {
         match crate::state::decision_log::latest_route(&paths.decisions(), &repository_id) {
             Ok(Some((family, effort))) => {
-                constraints.prior_family = Some(family);
-                constraints.prior_effort = Some(effort);
+                base_constraints.prior_family = Some(family);
+                base_constraints.prior_effort = Some(effort);
             }
             Ok(None) => {}
             Err(error) => {
@@ -157,6 +210,45 @@ pub(super) fn resolve_route(
             }
         }
     }
+    Ok(PreparedRoute {
+        global: global.clone(),
+        native,
+        context,
+        loaded,
+        paths,
+        installation,
+        catalog,
+        compiled,
+        base_constraints,
+    })
+}
+
+pub(super) fn resolve_prepared(
+    prepared: &PreparedRoute,
+    args: &RouteArgs,
+    prompt: prompt::PromptInput,
+    mode: LaunchMode,
+) -> Result<ResolvedRoute, AppError> {
+    let global = &prepared.global;
+    let native = &prepared.native;
+    let context = &prepared.context;
+    let loaded = &prepared.loaded;
+    let paths = &prepared.paths;
+    let installation = &prepared.installation;
+    let catalog = &prepared.catalog;
+    reconcile_explicit(args, native)?;
+    let routing_started = Instant::now();
+    let features = extract_features(&prompt.analysis);
+    let applied = prepared.compiled.evaluate(
+        &features.normalized,
+        &features.explicit_paths,
+        features.dimensions,
+    );
+    let mut constraints = applied.constraints;
+    constraints.hysteresis_points = prepared.base_constraints.hysteresis_points;
+    constraints.prior_family = prepared.base_constraints.prior_family.clone();
+    constraints.prior_effort = prepared.base_constraints.prior_effort;
+    constraints.calibration = prepared.base_constraints.calibration;
     constraints.explicit_family = args
         .family
         .as_deref()
@@ -236,96 +328,6 @@ pub(super) fn resolve_route(
         reasons.clone(),
         features.escalation_signals.clone(),
     );
-    let mut classifier_ran = false;
-    let mut classifier_outcome = "skipped".to_owned();
-    let classifier_mode = effective_classifier(args, &loaded);
-    let luna = catalog.first_family(&ModelFamily::Luna);
-    let deterministic_semantic_gap = features.task_type == TaskType::Coding
-        && features.reasons.is_empty()
-        && features.escalation_signals.is_empty()
-        && decision.matched_rules.is_empty();
-    let classifier_candidate = classifier_mode != ClassifierMode::Auto
-        || deterministic_semantic_gap
-        || !decision.conflicts.is_empty();
-    let classifier_would_run = classifier_candidate
-        && classifier::should_run(
-            classifier_mode,
-            decision.confidence,
-            loaded.config.classifier_confidence_threshold_basis_points,
-            !decision.conflicts.is_empty(),
-            decision.matched_rules.len(),
-            prompt.valid_utf8,
-            (args.model.is_some() || native.model.is_some())
-                && (args.effort.is_some() || native.effort_raw.is_some()),
-            args.offline,
-            luna.is_some(),
-        )
-        && prompt.original.is_some();
-    if classifier_would_run && (args.dry_run || explain) && !args.run_classifier {
-        classifier_outcome = "would-run".into();
-    } else if classifier_would_run && let (Some(luna), Some(_)) = (luna, prompt.original.as_ref()) {
-        classifier_ran = true;
-        let classifier_prompt =
-            classifier::build_classifier_prompt(&prompt.analysis, &context, &decision)
-                .map_err(|error| AppError::Serialization(error.to_string()))?;
-        match classifier::runner::run(
-            &installation,
-            &luna.id,
-            &classifier_prompt,
-            loaded.config.classifier_timeout.duration(),
-        ) {
-            Ok(result) => {
-                classifier_outcome = result.category;
-                let dimensions =
-                    classifier::blend_dimensions(decision.dimensions, &result.assessment);
-                let task_type = if matches!(
-                    features.task_type,
-                    TaskType::Empty | TaskType::Documentation | TaskType::Mechanical
-                ) {
-                    features.task_type.clone()
-                } else {
-                    result.assessment.task_type.clone()
-                };
-                let mut merged_reasons = reasons;
-                merged_reasons.extend(result.assessment.reasons.clone());
-                let mut merged_signals = features.escalation_signals.clone();
-                merged_signals.extend(result.assessment.escalation_signals.clone());
-                let deterministic_confidence = decision.confidence.basis_points();
-                decision = route(
-                    task_type,
-                    dimensions,
-                    loaded.config.weights,
-                    constraints.clone(),
-                    applied.matches.clone(),
-                    applied.conflicts.clone(),
-                    evidence,
-                    merged_reasons,
-                    merged_signals,
-                );
-                let blended_confidence = (u32::from(deterministic_confidence) * 7
-                    + u32::from(result.assessment.confidence.basis_points()) * 3
-                    + 5)
-                    / 10;
-                decision.confidence = Confidence::from_basis_points(blended_confidence as u16)
-                    .expect("blended confidence is bounded");
-            }
-            Err(error) => {
-                classifier_outcome = match error {
-                    classifier::ClassifierError::Timeout => "timeout",
-                    classifier::ClassifierError::InvalidOutput(_) => "invalid-output",
-                    classifier::ClassifierError::Exit => "nonzero-exit",
-                    classifier::ClassifierError::Nested => "nested-refused",
-                    classifier::ClassifierError::Temporary(_) => "temporary-error",
-                    classifier::ClassifierError::Launch(_) => "launch-error",
-                }
-                .into();
-                if global.verbose {
-                    eprintln!("cauto: classifier {classifier_outcome}; using deterministic route");
-                }
-            }
-        }
-    }
-
     let exact_model = args
         .model
         .clone()
@@ -336,10 +338,10 @@ pub(super) fn resolve_route(
     let fast_mode = if native.service_tier.is_some() {
         FastMode::Inherit
     } else {
-        effective_fast(args, &loaded)
+        effective_fast(args, loaded)
     };
     let resolved = resolve_preset(
-        &catalog,
+        catalog,
         &PresetRequest {
             model_id: exact_model,
             family: decision.recommended_family.clone(),
@@ -375,18 +377,88 @@ pub(super) fn resolve_route(
         inject_effort: native.effort_raw.is_none(),
         inject_service_tier: native.service_tier.is_none() && plan.preset.service_tier.is_some(),
     };
+    let route_source = if args.model.is_some()
+        || args.family.is_some()
+        || args.effort.is_some()
+        || native.model.is_some()
+        || native.effort_raw.is_some()
+    {
+        RouteSource::Explicit
+    } else {
+        RouteSource::Local
+    };
+    let decisive_local_evidence = route_source == RouteSource::Explicit
+        || !matches!(features.task_type, crate::routing::TaskType::Coding)
+        || !features.reasons.is_empty()
+        || !features.escalation_signals.is_empty()
+        || !applied.matches.is_empty()
+        || !applied.conflicts.is_empty()
+        || !features.explicit_paths.is_empty()
+        || features.clear_reproduction
+        || features.clear_completion;
+    let routing_elapsed_micros = routing_started.elapsed().as_micros() as u64;
     Ok(ResolvedRoute {
-        context,
-        loaded,
-        paths,
-        catalog,
+        context: context.clone(),
+        loaded: loaded.clone(),
+        paths: paths.clone(),
+        catalog: catalog.clone(),
         prompt,
         decision,
         plan,
         policy,
-        classifier_ran,
-        classifier_outcome,
+        route_source,
+        routing_elapsed_micros,
+        decisive_local_evidence,
     })
+}
+
+pub(super) fn resolve_route(
+    global: &GlobalArgs,
+    args: &RouteArgs,
+    mode: LaunchMode,
+    _explain: bool,
+    agent_session: bool,
+) -> Result<ResolvedRoute, AppError> {
+    let prompt = prompt::acquire(args, mode)?;
+    let prepared = prepare_route(global, args, agent_session)?;
+    resolve_prepared(&prepared, args, prompt, mode)
+}
+
+pub(super) fn run_agent_route_benchmark(
+    global: &GlobalArgs,
+    iterations: u64,
+) -> Result<ExitCode, AppError> {
+    let iterations = iterations.max(1);
+    let args = RouteArgs::default();
+    let prepared = prepare_route(global, &args, true)?;
+    let prompt = "what is this project? explain to me like im 5";
+    let mut samples = Vec::with_capacity(iterations as usize);
+    let mut checksum = 0_u64;
+    for _ in 0..iterations {
+        let started = Instant::now();
+        let resolved = resolve_prepared(
+            &prepared,
+            &args,
+            prompt::PromptInput::from_text(prompt.to_owned()),
+            LaunchMode::Interactive,
+        )?;
+        samples.push(started.elapsed().as_nanos());
+        checksum = checksum.wrapping_add(u64::from(resolved.decision.normalized_score));
+    }
+    samples.sort_unstable();
+    let percentile = |value: usize| {
+        let rank = (samples.len() * value).div_ceil(100).saturating_sub(1);
+        samples[rank]
+    };
+    let total: u128 = samples.iter().sum();
+    println!(
+        "iterations={iterations} median_ns={} mean_ns={} p95_ns={} max_ns={} checksum={checksum}",
+        percentile(50),
+        total / u128::from(iterations),
+        percentile(95),
+        samples[samples.len() - 1],
+    );
+    Ok(ExitCode::SUCCESS)
 }
 
 pub(super) fn run_route(
@@ -405,8 +477,8 @@ pub(super) fn run_route(
         decision,
         plan,
         policy,
-        classifier_ran,
-        classifier_outcome,
+        route_source,
+        routing_elapsed_micros,
         ..
     } = resolved;
     let command_args = materialize_args(&plan, policy);
@@ -419,8 +491,8 @@ pub(super) fn run_route(
                 plan.downgrade.as_ref(),
                 mode,
                 &context.repository.root.to_string_lossy(),
-                classifier_ran,
-                &classifier_outcome,
+                route_source,
+                routing_elapsed_micros,
             )
             .map_err(|error| AppError::Serialization(error.to_string()))?
         );
@@ -440,9 +512,6 @@ pub(super) fn run_route(
         if let Some(warning) = &catalog.warning {
             println!("Catalog: {warning}");
         }
-        if classifier_outcome == "would-run" {
-            println!("Classifier: would run; pass --run-classifier to include it in this preview");
-        }
     }
     if args.print_command {
         println!(
@@ -458,8 +527,8 @@ pub(super) fn run_route(
         decision: &decision,
         plan: &plan,
         policy,
-        classifier_ran,
-        classifier_outcome: &classifier_outcome,
+        route_source,
+        routing_elapsed_micros,
         decision_mode: if args.dry_run || explain {
             "preview"
         } else {

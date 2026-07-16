@@ -10,8 +10,18 @@ use crate::routing::LaunchMode;
 pub(super) struct PromptInput {
     pub original: Option<OsString>,
     pub analysis: String,
-    pub valid_utf8: bool,
     pub byte_length: usize,
+}
+
+impl PromptInput {
+    pub(super) fn from_text(value: String) -> Self {
+        let byte_length = value.len();
+        Self {
+            original: Some(OsString::from(&value)),
+            analysis: value,
+            byte_length,
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -75,18 +85,16 @@ pub(super) fn acquire(args: &RouteArgs, mode: LaunchMode) -> Result<PromptInput,
     if original.is_none() && (mode == LaunchMode::Exec || !std::io::stdin().is_terminal()) {
         return Err(AppError::PromptMissing);
     }
-    let (analysis, valid_utf8, byte_length) = match &original {
+    let (analysis, byte_length) = match &original {
         Some(prompt) => (
             prompt.to_string_lossy().into_owned(),
-            prompt.to_str().is_some(),
             os_bytes(prompt).len(),
         ),
-        None => (String::new(), true, 0),
+        None => (String::new(), 0),
     };
     Ok(PromptInput {
         original,
         analysis,
-        valid_utf8,
         byte_length,
     })
 }

@@ -64,13 +64,6 @@ pub struct RouteArgs {
     pub allow_ultra: bool,
     #[arg(long)]
     pub allow_downgrade: bool,
-    #[arg(long, value_parser = ["auto", "always", "never"])]
-    pub classifier: Option<String>,
-    #[arg(long, conflicts_with = "classifier")]
-    pub no_classifier: bool,
-    /// Allow a classifier task to run while previewing with --dry-run or explain.
-    #[arg(long, conflicts_with = "no_classifier")]
-    pub run_classifier: bool,
     #[arg(long)]
     pub offline: bool,
     #[arg(long)]
@@ -112,10 +105,6 @@ pub struct AgentRouteArgs {
     pub allow_ultra: bool,
     #[arg(long)]
     pub allow_downgrade: bool,
-    #[arg(long, value_parser = ["auto", "always", "never"])]
-    pub classifier: Option<String>,
-    #[arg(long, conflicts_with = "classifier")]
-    pub no_classifier: bool,
     #[arg(long)]
     pub offline: bool,
     #[arg(long, value_name = "TEXT")]
@@ -142,9 +131,6 @@ impl From<AgentRouteArgs> for RouteArgs {
             inherit_fast: args.inherit_fast,
             allow_ultra: args.allow_ultra,
             allow_downgrade: args.allow_downgrade,
-            classifier: args.classifier,
-            no_classifier: args.no_classifier,
-            run_classifier: false,
             offline: args.offline,
             dry_run: false,
             print_command: false,
@@ -203,6 +189,11 @@ pub enum Commands {
         policy: PathBuf,
         #[arg(long)]
         catalog: PathBuf,
+        #[arg(long, default_value_t = 1_000)]
+        iterations: u64,
+    },
+    #[command(hide = true)]
+    BenchAgentRoute {
         #[arg(long, default_value_t = 1_000)]
         iterations: u64,
     },

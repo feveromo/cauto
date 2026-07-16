@@ -7,7 +7,7 @@ use crate::codex::launch::{InjectionPolicy, materialize_args};
 use crate::context::ContextSnapshot;
 use crate::error::AppError;
 use crate::paths::CautoPaths;
-use crate::routing::{LaunchPlan, RouteDecision};
+use crate::routing::{LaunchPlan, RouteDecision, RouteSource};
 use crate::state::{
     DecisionRecord, append_decision, prompt_sha256, repository_identifier, sanitize_argv,
 };
@@ -22,8 +22,8 @@ pub(super) struct DecisionLogInput<'a> {
     pub decision: &'a RouteDecision,
     pub plan: &'a LaunchPlan,
     pub policy: InjectionPolicy,
-    pub classifier_ran: bool,
-    pub classifier_outcome: &'a str,
+    pub route_source: RouteSource,
+    pub routing_elapsed_micros: u64,
     pub decision_mode: &'a str,
     pub strict: bool,
     pub quiet: bool,
@@ -86,7 +86,7 @@ pub(super) fn write(input: DecisionLogInput<'_>) -> Result<Option<String>, AppEr
         .map(|matched| matched.rule_id.clone())
         .collect();
     let record = DecisionRecord {
-        schema_version: 1,
+        schema_version: 2,
         record_type: "decision".into(),
         decision_mode: input.decision_mode.into(),
         decision_id: decision_id.clone(),
@@ -117,8 +117,10 @@ pub(super) fn write(input: DecisionLogInput<'_>) -> Result<Option<String>, AppEr
         selected_effort: input.plan.preset.display_level,
         ultra_candidate: input.decision.ultra_candidate,
         ultra_selected: input.decision.ultra_selected,
-        classifier_ran: input.classifier_ran,
-        classifier_outcome: input.classifier_outcome.into(),
+        route_source: input.route_source,
+        routing_elapsed_micros: input.routing_elapsed_micros,
+        classifier_ran: false,
+        classifier_outcome: String::new(),
         catalog_source: input.plan.preset.source.clone(),
         downgrade: input.plan.downgrade.clone(),
         sanitized_argv: sanitize_argv(&argv),

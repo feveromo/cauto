@@ -13,10 +13,11 @@ scores a task, selects the lowest capable installed model and reasoning effort,
 explains the choice, and records a redacted decision. Its adaptive agent mode
 does that once for the opening text turn of a native Codex thread, pins the
 route for the rest of the session, and learns from later corrections without
-requiring manual feedback or tuning commands.
+requiring manual feedback or tuning commands. Routing is entirely local Rust:
+submitting a prompt never starts a hidden model call.
 
 ```text
-first turn ──> cauto picks a route ──> route stays pinned ──> native codex
+first turn ──> local evidence? ──> cauto route or native route ──> pinned thread
 ```
 
 It reuses the native CLI's existing ChatGPT authentication, subscription
@@ -34,6 +35,9 @@ billing layer, or OpenAI API client. It never configures an API key.
 - **Adapt without a feedback chore.** Clear corrections and explicit route
   changes become bounded signals automatically; weak proxies such as prompt
   length, tool count, or session duration do not.
+- **Keep the first turn fast.** Repository state, policy, and the live model
+  catalog are prepared before input; pressing Enter performs only in-memory
+  feature extraction, rule matching, and selection.
 - **See and control every decision.** The initial session route and intentional
   overrides remain visible, preview tools still work, and history contains
   redacted records—never raw prompts.
@@ -73,7 +77,9 @@ through a local transparent transport, routes the first text turn once, pins
 that model and effort for the thread, keeps approvals, tools, streaming,
 interruption, and thread storage native, and shuts down its App Server child
 when the TUI exits. `--resume` restores and preserves the native thread's stored
-route rather than classifying its next follow-up as a new task.
+route rather than treating its next follow-up as a new task. If the opening
+prompt has too little local evidence, cauto keeps Codex's incoming native model
+and effort instead of forcing a generic guess.
 
 The original `cauto "task"` form remains a one-shot launcher: it routes the
 opening task and then replaces itself with native Codex on Unix. Use it when
@@ -129,15 +135,14 @@ Configuration is loaded from:
 2. `<repo-root>/.cauto.toml`
 
 CLI and explicit native overrides are applied above those typed layers. Project
-policy accepts only `version` and `rules`; classifier behavior, defaults, Fast,
-Ultra authorization, downgrade policy, logging, cache/timeouts, hysteresis, and
-weights remain user- or CLI-owned. Example user configuration:
+policy accepts only `version` and `rules`; defaults, Fast, Ultra authorization,
+downgrade policy, logging, cache/timeouts, hysteresis, and
+weights remain user- or CLI-owned. Classifier keys from cauto 0.2 are rejected
+with a migration message because routing is now local-only. Example user
+configuration:
 
 ```toml
 version = 1
-# "auto" uses Luna/Low only for low-confidence tasks with no deterministic semantic evidence.
-classifier = "auto"
-classifier_confidence_threshold = 0.72
 default_model = "gpt-5.6-sol"
 default_effort = "medium"
 fast_mode = "inherit"
@@ -147,7 +152,6 @@ log_raw_prompts = false
 catalog_cache_hours = 12
 git_timeout_ms = 250
 catalog_timeout_ms = 2500
-classifier_timeout_seconds = 45
 hysteresis_points = 0
 
 [weights]
@@ -192,7 +196,7 @@ tasks, not turns in one identified thread. Preview decisions never affect hyster
 and history never contains a prior raw prompt.
 
 Adaptive agent threads do not use cross-turn hysteresis because they do not
-rerun the router or classifier between turns. The opening route stays pinned.
+rerun the router between turns. The opening route stays pinned.
 A clear underpowered or overkill correction is attached to that initial
 decision and can influence a later new session only after the repository's
 conservative calibration threshold is met. An explicit native model/effort
@@ -200,28 +204,23 @@ change intentionally replaces the current thread's pin.
 
 `cauto models` shows the installed catalog. Add `--refresh`, `--bundled`,
 `--include-hidden`, or `--json`. `cauto doctor` reports the resolved binary,
-Codex version, paths, cache age/source, aliases, classifier usability, and
+Codex version, paths, cache age/source, local routing engine, aliases, and
 actual Max/Ultra support without printing secrets.
 
-## Classifier
+## First-Turn Latency And Route Notices
 
-The deterministic route runs first. By default, the Luna classifier runs only
-for a low-confidence task that has no deterministic semantic feature, signal,
-or matched policy rule. Recognized tasks stay on the fast path with no extra
-subprocess. Force classification with `--classifier always`; disable it with
-`--no-classifier`, `--classifier never`, or `--offline`.
+`cauto agent` loads repository context, typed config, compiled rules, and model
+capabilities before the native input box appears. After Enter, the route is a
+bounded in-memory calculation; no `codex exec`, network request, catalog load,
+Git command, or filesystem walk is on that prompt path.
 
-`--dry-run` and `explain` report when the classifier would run but do not start
-it. Pass `--run-classifier` with a preview only when that extra native Codex
-task is intentional.
-
-The classifier uses native `codex exec` and saved authentication in a private
-temporary directory, read-only sandbox, low effort, strict JSON schema, and a
-separate timed process group. It receives bounded metadata, not file contents
-or environment data. Failures fall back to deterministic routing. It can never
-authorize Ultra or weaken deterministic or project safety floors. Its semantic
-evidence can raise dimensions that exact phrase matching missed, but cannot
-lower deterministic evidence.
+When local evidence is decisive, cauto applies the route and pins it. When it
+is not, cauto preserves the native Codex route and records that provenance.
+Clients that advertise the optional `infoNotifications` capability receive a
+calm informational line such as `Route set · Luna / Low` or
+`Native route kept · Sol / Extra High`, with a short reason. Older Codex builds
+stay silent rather than rendering ordinary routing as a warning. Actual routing
+or persistence failures still use native warning notifications.
 
 ## Privacy And History
 
@@ -246,7 +245,10 @@ Silence is not treated as approval. Prompt length, elapsed time, token use, and
 tool count are not treated as outcome evidence. `cauto report` separates
 adaptive-agent, direct launched, preview, and legacy/untyped decisions; its
 primary route distribution and health rates use all real launches. It also
-reports feedback sources and unresolved generic-baseline concentration.
+reports route-source distribution, native-preservation rate, local routing
+p50/p95/max latency, feedback sources, and unresolved generic-baseline
+concentration. Classifier rates are retained only for old schema-1 history and
+are labeled as legacy.
 
 ## Automatic Adaptation And Optional Manual Controls
 
@@ -268,6 +270,8 @@ Agent-generated corrections use the same conservative threshold and apply an
 eligible recommendation automatically. `right` counts against a change;
 `failed-for-other-reason` is displayed but cannot affect routing. Preview
 decisions and feedback attached to previews are excluded.
+Native-preserved decisions are also excluded because cauto cannot learn from a
+route it deliberately did not choose.
 
 Applied values live separately from config and policy in
 `~/.local/state/cauto/calibration.json`. The versioned file contains repository
@@ -298,5 +302,5 @@ eligibility, recommendations, applied calibration, and excluded previews.
 
 Benchmark a release build with `scripts/bench.sh`. It measures help, explain,
 deterministic dry-run, a 20 KB prompt, cached catalog loading, route-to-command
-planning, and pure scoring while excluding the classifier and final Codex
-runtime.
+planning, 1,000 prepared adaptive-agent first-turn routes, and pure scoring
+while excluding final Codex runtime.

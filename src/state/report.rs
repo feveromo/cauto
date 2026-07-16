@@ -5,9 +5,18 @@ use std::path::Path;
 use serde::Serialize;
 
 use crate::error::AppError;
+use crate::routing::RouteSource;
 
 use super::decision_log::DecisionRecord;
 use super::tuning::{CalibrationStore, RepositoryTuning, analyze_repository, load_store};
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct RoutingLatencyMicros {
+    pub sample_count: u64,
+    pub p50: u64,
+    pub p95: u64,
+    pub max: u64,
+}
 
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct HistoryReport {
@@ -25,11 +34,15 @@ pub struct HistoryReport {
     pub legacy_route_distribution: BTreeMap<String, u64>,
     pub model_family_distribution: BTreeMap<String, u64>,
     pub effort_distribution: BTreeMap<String, u64>,
+    pub route_source_distribution: BTreeMap<String, u64>,
+    pub agent_native_preserved_rate_basis_points: u16,
+    pub routing_latency_micros: RoutingLatencyMicros,
     pub unresolved_generic_baseline_decisions: u64,
     pub unresolved_generic_baseline_rate_basis_points: u16,
     pub average_confidence_basis_points: u16,
-    pub classifier_invocation_rate_basis_points: u16,
-    pub classifier_failure_rate_basis_points: u16,
+    pub legacy_classifier_sample_count: u64,
+    pub legacy_classifier_invocation_rate_basis_points: u16,
+    pub legacy_classifier_failure_rate_basis_points: u16,
     pub catalog_fallback_rate_basis_points: u16,
     pub downgrade_rate_basis_points: u16,
     pub feedback_distribution: BTreeMap<String, u64>,
@@ -58,6 +71,31 @@ fn top_rules(map: BTreeMap<String, u64>) -> Vec<(String, u64)> {
     values
 }
 
+const fn route_source_label(source: RouteSource) -> &'static str {
+    match source {
+        RouteSource::Local => "local",
+        RouteSource::NativePreserved => "native-preserved",
+        RouteSource::Explicit => "explicit",
+    }
+}
+
+fn latency_summary(mut samples: Vec<u64>) -> RoutingLatencyMicros {
+    if samples.is_empty() {
+        return RoutingLatencyMicros::default();
+    }
+    samples.sort_unstable();
+    let percentile = |value: usize| {
+        let rank = (samples.len() * value).div_ceil(100).saturating_sub(1);
+        samples[rank]
+    };
+    RoutingLatencyMicros {
+        sample_count: samples.len() as u64,
+        p50: percentile(50),
+        p95: percentile(95),
+        max: samples[samples.len() - 1],
+    }
+}
+
 pub fn build_report(path: &Path) -> Result<HistoryReport, AppError> {
     build_report_inner(path, CalibrationStore::default())
 }
@@ -75,7 +113,7 @@ fn build_report_inner(path: &Path, store: CalibrationStore) -> Result<HistoryRep
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             let mut report = HistoryReport {
-                schema_version: 3,
+                schema_version: 4,
                 ..HistoryReport::default()
             };
             report.feedback_by_repository = analyze_repository(path, &store, None)?.repositories;
@@ -89,12 +127,15 @@ fn build_report_inner(path: &Path, store: CalibrationStore) -> Result<HistoryRep
         }
     };
     let mut report = HistoryReport {
-        schema_version: 3,
+        schema_version: 4,
         ..HistoryReport::default()
     };
     let mut confidence_total = 0_u64;
     let mut classifier_runs = 0_u64;
     let mut classifier_failures = 0_u64;
+    let mut legacy_classifier_samples = 0_u64;
+    let mut native_preserved_agent_decisions = 0_u64;
+    let mut routing_latencies = Vec::new();
     let mut fallbacks = 0_u64;
     let mut downgrades = 0_u64;
     let mut raising = BTreeMap::new();
@@ -135,9 +176,15 @@ fn build_report_inner(path: &Path, store: CalibrationStore) -> Result<HistoryRep
                 report.total_launched_decisions += 1;
                 if mode.as_deref() == Some("agent") {
                     report.total_agent_decisions += 1;
+                    native_preserved_agent_decisions +=
+                        u64::from(record.route_source == RouteSource::NativePreserved);
                     increment(&mut report.agent_route_distribution, route.clone());
                 }
                 increment(&mut report.route_distribution, route);
+                increment(
+                    &mut report.route_source_distribution,
+                    route_source_label(record.route_source),
+                );
                 increment(
                     &mut report.model_family_distribution,
                     record.selected_family.to_string(),
@@ -147,14 +194,23 @@ fn build_report_inner(path: &Path, store: CalibrationStore) -> Result<HistoryRep
                     record.selected_effort.to_string(),
                 );
                 report.unresolved_generic_baseline_decisions += u64::from(
-                    record.matched_rule_ids.is_empty()
+                    record.route_source != RouteSource::NativePreserved
+                        && record.matched_rule_ids.is_empty()
                         && record.dimensions == crate::routing::DimensionScores::default()
-                        && (!record.classifier_ran || record.classifier_outcome != "success"),
+                        && (record.schema_version >= 2
+                            || !record.classifier_ran
+                            || record.classifier_outcome != "success"),
                 );
                 confidence_total += u64::from(record.confidence_basis_points);
-                classifier_runs += u64::from(record.classifier_ran);
-                classifier_failures +=
-                    u64::from(record.classifier_ran && record.classifier_outcome != "success");
+                if record.schema_version <= 1 {
+                    legacy_classifier_samples += 1;
+                    classifier_runs += u64::from(record.classifier_ran);
+                    classifier_failures +=
+                        u64::from(record.classifier_ran && record.classifier_outcome != "success");
+                }
+                if record.schema_version >= 2 && record.routing_elapsed_micros > 0 {
+                    routing_latencies.push(record.routing_elapsed_micros);
+                }
                 fallbacks += u64::from(matches!(
                     record.catalog_source,
                     crate::routing::CapabilitySource::Fallback
@@ -194,9 +250,15 @@ fn build_report_inner(path: &Path, store: CalibrationStore) -> Result<HistoryRep
         .checked_div(report.total_launched_decisions)
         .unwrap_or(0)
         .min(10_000) as u16;
-    report.classifier_invocation_rate_basis_points =
-        rate(classifier_runs, report.total_launched_decisions);
-    report.classifier_failure_rate_basis_points = rate(classifier_failures, classifier_runs);
+    report.legacy_classifier_sample_count = legacy_classifier_samples;
+    report.legacy_classifier_invocation_rate_basis_points =
+        rate(classifier_runs, legacy_classifier_samples);
+    report.legacy_classifier_failure_rate_basis_points = rate(classifier_failures, classifier_runs);
+    report.agent_native_preserved_rate_basis_points = rate(
+        native_preserved_agent_decisions,
+        report.total_agent_decisions,
+    );
+    report.routing_latency_micros = latency_summary(routing_latencies);
     report.catalog_fallback_rate_basis_points = rate(fallbacks, report.total_launched_decisions);
     report.downgrade_rate_basis_points = rate(downgrades, report.total_launched_decisions);
     report.unresolved_generic_baseline_rate_basis_points = rate(

@@ -54,7 +54,6 @@ fn multiline_prompt_is_redacted_from_json() {
         .args([
             "--codex-bin",
             codex.to_str().unwrap(),
-            "--no-classifier",
             "--dry-run",
             "--json",
             "--prompt",
@@ -70,7 +69,7 @@ fn multiline_prompt_is_redacted_from_json() {
 }
 
 #[test]
-fn previews_do_not_start_classifier_without_explicit_opt_in() {
+fn preview_routing_is_local_and_never_starts_codex_exec() {
     let home = tempdir().unwrap();
     let codex = common::fake_codex(home.path());
     let invocation_log = home.path().join("codex-invocations.log");
@@ -80,49 +79,6 @@ fn previews_do_not_start_classifier_without_explicit_opt_in() {
         .args([
             "--codex-bin",
             codex.to_str().unwrap(),
-            "--classifier",
-            "always",
-            "--dry-run",
-            "--prompt",
-            "figure out why this is broken",
-        ])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("Classifier: would run"));
-
-    common::cauto_command(home.path())
-        .env("FAKE_CODEX_LOG", &invocation_log)
-        .args([
-            "--codex-bin",
-            codex.to_str().unwrap(),
-            "explain",
-            "--classifier",
-            "always",
-            "--prompt",
-            "figure out why this is broken",
-        ])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("Classifier: would run"));
-
-    let invocations = std::fs::read_to_string(&invocation_log).unwrap();
-    assert!(!invocations.lines().any(|line| line.starts_with("exec ")));
-}
-
-#[test]
-fn preview_classifier_can_be_explicitly_requested() {
-    let home = tempdir().unwrap();
-    let codex = common::fake_codex(home.path());
-    let invocation_log = home.path().join("codex-invocations.log");
-
-    common::cauto_command(home.path())
-        .env("FAKE_CODEX_LOG", &invocation_log)
-        .args([
-            "--codex-bin",
-            codex.to_str().unwrap(),
-            "--classifier",
-            "always",
-            "--run-classifier",
             "--dry-run",
             "--prompt",
             "figure out why this is broken",
@@ -130,12 +86,35 @@ fn preview_classifier_can_be_explicitly_requested() {
         .assert()
         .success();
 
+    common::cauto_command(home.path())
+        .env("FAKE_CODEX_LOG", &invocation_log)
+        .args([
+            "--codex-bin",
+            codex.to_str().unwrap(),
+            "explain",
+            "--prompt",
+            "figure out why this is broken",
+        ])
+        .assert()
+        .success();
+
     let invocations = std::fs::read_to_string(&invocation_log).unwrap();
-    assert!(invocations.lines().any(|line| line.starts_with("exec ")));
+    assert!(!invocations.lines().any(|line| line.starts_with("exec ")));
 }
 
 #[test]
-fn default_auto_classifier_only_targets_deterministic_semantic_gaps() {
+fn removed_classifier_flags_are_absent_from_help() {
+    let home = tempdir().unwrap();
+    common::cauto_command(home.path())
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--classifier").not())
+        .stdout(predicate::str::contains("--run-classifier").not());
+}
+
+#[test]
+fn project_explanation_routes_locally_to_luna_low() {
     let home = tempdir().unwrap();
     let codex = common::fake_codex(home.path());
 
@@ -145,29 +124,12 @@ fn default_auto_classifier_only_targets_deterministic_semantic_gaps() {
             codex.to_str().unwrap(),
             "--dry-run",
             "--prompt",
-            "how do these project widgets work in here",
+            "what is this project? explain to me like im 5",
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Classifier: would run"));
-
-    for recognized in [
-        "the desktop service wont launch pls fix",
-        "reverse engineer this protocol boundary",
-        "fix typo in README.md and prove that it renders",
-    ] {
-        common::cauto_command(home.path())
-            .args([
-                "--codex-bin",
-                codex.to_str().unwrap(),
-                "--dry-run",
-                "--prompt",
-                recognized,
-            ])
-            .assert()
-            .success()
-            .stdout(predicate::str::contains("Classifier: would run").not());
-    }
+        .stdout(predicate::str::contains("Selected: gpt-5.6-luna / Low"))
+        .stdout(predicate::str::contains("Classifier:").not());
 }
 
 #[test]
@@ -200,8 +162,6 @@ reason = "requires the cheapest family"
         repository.to_str().unwrap(),
         "--codex-bin",
         codex.to_str().unwrap(),
-        "--classifier",
-        "auto",
         "--dry-run",
         "--json",
         "policy floor and cost ceiling",
@@ -239,7 +199,9 @@ reason = "requires the cheapest family"
         with_policy["decision"]["confidence_basis_points"].as_u64()
             < without_policy["decision"]["confidence_basis_points"].as_u64()
     );
-    assert_eq!(with_policy["classifier"]["outcome"], "would-run");
+    assert_eq!(with_policy["decision"]["route_source"], "local");
+    assert!(with_policy.get("classifier").is_none());
+    assert!(with_policy["routing"]["elapsed_micros"].is_number());
 }
 
 #[test]
@@ -252,7 +214,6 @@ fn prompt_file_and_stdin_are_supported() {
         .args([
             "--codex-bin",
             codex.to_str().unwrap(),
-            "--no-classifier",
             "--dry-run",
             "--prompt-file",
             prompt_path.to_str().unwrap(),
@@ -264,7 +225,6 @@ fn prompt_file_and_stdin_are_supported() {
     command.args([
         "--codex-bin",
         codex.to_str().unwrap(),
-        "--no-classifier",
         "--dry-run",
         "--stdin",
     ]);
@@ -280,7 +240,6 @@ fn forwarding_requires_delimiter_and_preserves_repeated_images() {
         .args([
             "--codex-bin",
             codex.to_str().unwrap(),
-            "--no-classifier",
             "--dry-run",
             "--print-command",
             "--prompt",
@@ -340,7 +299,6 @@ fn forwarded_native_overrides_are_not_duplicated() {
         .args([
             "--codex-bin",
             codex.to_str().unwrap(),
-            "--no-classifier",
             "--dry-run",
             "--print-command",
             "--prompt",
@@ -370,7 +328,6 @@ fn explicit_fast_uses_catalog_tier() {
         .args([
             "--codex-bin",
             codex.to_str().unwrap(),
-            "--no-classifier",
             "--fast",
             "--dry-run",
             "--print-command",
@@ -389,7 +346,6 @@ fn explicit_ultra_does_not_claim_ineligibility() {
         .args([
             "--codex-bin",
             codex.to_str().unwrap(),
-            "--no-classifier",
             "--effort",
             "ultra",
             "--allow-ultra",

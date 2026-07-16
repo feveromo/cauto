@@ -4,6 +4,7 @@ use std::str::FromStr;
 use serde::Serialize;
 
 use crate::error::AppError;
+use crate::routing::RouteSource;
 
 use super::decision_log::{DecisionRecord, append_json_line, timestamp_now};
 
@@ -84,11 +85,13 @@ pub fn append_feedback(
         .filter(|line| !line.is_empty())
         .filter_map(|line| serde_json::from_slice::<DecisionRecord>(line).ok())
         .find(|record| {
-            record.repository_identifier == repository_id && record.decision_mode != "preview"
+            record.repository_identifier == repository_id
+                && record.decision_mode != "preview"
+                && record.route_source != RouteSource::NativePreserved
         })
         .ok_or_else(|| {
             AppError::InvalidArguments(
-                "no prior cauto decision exists for the current repository".into(),
+                "no prior locally routed cauto decision exists for the current repository".into(),
             )
         })?;
     append_feedback_for_decision(

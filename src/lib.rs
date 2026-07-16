@@ -10,8 +10,6 @@ pub mod application;
 #[doc(hidden)]
 pub mod cache;
 #[doc(hidden)]
-pub mod classifier;
-#[doc(hidden)]
 pub mod cli;
 #[doc(hidden)]
 pub mod codex;

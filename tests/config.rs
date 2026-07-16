@@ -1,12 +1,11 @@
 use cauto::config::load;
-use cauto::routing::{ClassifierMode, FastMode, ModelFamily, ReasoningLevel};
+use cauto::routing::{FastMode, ModelFamily, ReasoningLevel};
 use proptest::prelude::*;
 use tempfile::tempdir;
 
 #[test]
 fn default_config_is_hands_off_without_cross_task_hysteresis() {
     let defaults = cauto::config::ValidatedConfig::default();
-    assert_eq!(defaults.classifier, ClassifierMode::Auto);
     assert_eq!(defaults.hysteresis_points, 0);
 }
 
@@ -19,7 +18,6 @@ fn project_overrides_user_rules_but_not_user_controls() {
         &user,
         r#"
 version = 1
-classifier = "never"
 fast_mode = "fast"
 default_model = "gpt-5.6-terra"
 default_effort = "low"
@@ -29,7 +27,6 @@ strict_logging = true
 catalog_cache_hours = 24
 git_timeout_ms = 500
 catalog_timeout_ms = 3000
-classifier_timeout_seconds = 30
 hysteresis_points = 4
 
 [weights]
@@ -56,7 +53,6 @@ effort_floor = "high"
     )
     .unwrap();
     let loaded = load(&user, Some(&project)).unwrap();
-    assert_eq!(loaded.config.classifier, ClassifierMode::Never);
     assert_eq!(loaded.config.fast_mode, FastMode::Fast);
     assert_eq!(loaded.config.default_model, "gpt-5.6-terra");
     assert_eq!(loaded.config.default_effort, ReasoningLevel::Low);
@@ -66,7 +62,6 @@ effort_floor = "high"
     assert_eq!(loaded.config.catalog_cache_hours.get(), 24);
     assert_eq!(loaded.config.git_timeout.get(), 500);
     assert_eq!(loaded.config.catalog_timeout.get(), 3_000);
-    assert_eq!(loaded.config.classifier_timeout.get(), 30_000);
     assert_eq!(loaded.config.hysteresis_points, 4);
     assert_eq!(loaded.config.weights.scope, 42);
     assert_eq!(loaded.config.rules.len(), 1);
@@ -83,7 +78,7 @@ fn project_policy_rejects_user_level_controls() {
     let root = tempdir().unwrap();
     let user = root.path().join("user.toml");
     let project = root.path().join("project.toml");
-    std::fs::write(&user, "version = 1\nclassifier = \"never\"\n").unwrap();
+    std::fs::write(&user, "version = 1\n").unwrap();
     std::fs::write(
         &project,
         r#"
@@ -99,6 +94,23 @@ default_effort = "ultra"
     assert!(error.contains(project.to_str().unwrap()));
     assert!(error.contains("unknown field"));
     assert!(error.contains("classifier"));
+}
+
+#[test]
+fn removed_classifier_settings_have_a_targeted_migration_error() {
+    let root = tempdir().unwrap();
+    for (key, value) in [
+        ("classifier", "\"auto\""),
+        ("classifier_confidence_threshold", "0.72"),
+        ("classifier_timeout_seconds", "45"),
+    ] {
+        let user = root.path().join(format!("{key}.toml"));
+        std::fs::write(&user, format!("version = 1\n{key} = {value}\n")).unwrap();
+        let error = load(&user, None).unwrap_err().to_string();
+        assert!(error.contains(key));
+        assert!(error.contains("removed in cauto 0.3"));
+        assert!(error.contains("local-only"));
+    }
 }
 
 #[test]

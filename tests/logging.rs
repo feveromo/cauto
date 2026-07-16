@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use cauto::routing::{
     BoundedScore, CapabilitySource, Conflict, DimensionScores, ModelFamily, ReasoningLevel,
-    TaskType,
+    RouteSource, TaskType,
 };
 use cauto::state::decision_log::{DecisionRecord, append_json_line, latest_route, timestamp_now};
 use cauto::state::{FeedbackKind, append_feedback};
@@ -48,6 +48,8 @@ fn record(index: usize) -> DecisionRecord {
         selected_effort: ReasoningLevel::Medium,
         ultra_candidate: false,
         ultra_selected: false,
+        route_source: RouteSource::Local,
+        routing_elapsed_micros: 100 + index as u64,
         classifier_ran: index.is_multiple_of(2),
         classifier_outcome: "success".into(),
         catalog_source: CapabilitySource::Cache,
@@ -129,7 +131,8 @@ fn report_summarizes_routes_and_rules() {
     assert_eq!(report.total_preview_decisions, 0);
     assert_eq!(report.total_legacy_decisions, 0);
     assert_eq!(report.average_confidence_basis_points, 8_000);
-    assert_eq!(report.classifier_invocation_rate_basis_points, 5_000);
+    assert_eq!(report.legacy_classifier_sample_count, 4);
+    assert_eq!(report.legacy_classifier_invocation_rate_basis_points, 5_000);
     assert_eq!(report.rules_most_often_raising_effort[0].0, "raise");
     assert_eq!(report.feedback_by_route["terra:medium"]["right"], 1);
     assert_eq!(
@@ -182,7 +185,7 @@ fn report_separates_launched_preview_and_legacy_decisions() {
     append_json_line(&path, &serde_json::to_vec(&legacy).unwrap()).unwrap();
 
     let report = build_report(&path).unwrap();
-    assert_eq!(report.schema_version, 3);
+    assert_eq!(report.schema_version, 4);
     assert_eq!(report.total_decisions, 4);
     assert_eq!(report.total_launched_decisions, 2);
     assert_eq!(report.total_agent_decisions, 1);
@@ -193,6 +196,33 @@ fn report_separates_launched_preview_and_legacy_decisions() {
     assert_eq!(report.agent_route_distribution["sol:high"], 1);
     assert_eq!(report.preview_route_distribution["sol:max"], 1);
     assert_eq!(report.legacy_route_distribution["luna:low"], 1);
+    assert_eq!(report.route_source_distribution["local"], 2);
+}
+
+#[test]
+fn report_tracks_native_preservation_and_local_routing_latency() {
+    let root = tempdir().unwrap();
+    let path = root.path().join("decisions.jsonl");
+    for (index, elapsed) in [10, 20, 30, 400].into_iter().enumerate() {
+        let mut decision = record(index);
+        decision.schema_version = 2;
+        decision.decision_mode = "agent".into();
+        decision.routing_elapsed_micros = elapsed;
+        if index == 3 {
+            decision.route_source = RouteSource::NativePreserved;
+        }
+        append_json_line(&path, &serde_json::to_vec(&decision).unwrap()).unwrap();
+    }
+
+    let report = build_report(&path).unwrap();
+    assert_eq!(report.route_source_distribution["local"], 3);
+    assert_eq!(report.route_source_distribution["native-preserved"], 1);
+    assert_eq!(report.agent_native_preserved_rate_basis_points, 2_500);
+    assert_eq!(report.routing_latency_micros.sample_count, 4);
+    assert_eq!(report.routing_latency_micros.p50, 20);
+    assert_eq!(report.routing_latency_micros.p95, 400);
+    assert_eq!(report.routing_latency_micros.max, 400);
+    assert_eq!(report.legacy_classifier_sample_count, 0);
 }
 
 #[test]
@@ -279,6 +309,24 @@ fn feedback_ignores_preview_decisions() {
     assert_eq!(
         append_feedback(&path, "repo", FeedbackKind::Underpowered).unwrap(),
         "launched"
+    );
+}
+
+#[test]
+fn feedback_ignores_native_preserved_decisions() {
+    let root = tempdir().unwrap();
+    let path = root.path().join("decisions.jsonl");
+    let mut local = record(1);
+    local.decision_id = "local".into();
+    append_json_line(&path, &serde_json::to_vec(&local).unwrap()).unwrap();
+    let mut native = record(2);
+    native.decision_id = "native".into();
+    native.route_source = RouteSource::NativePreserved;
+    append_json_line(&path, &serde_json::to_vec(&native).unwrap()).unwrap();
+
+    assert_eq!(
+        append_feedback(&path, "repo", FeedbackKind::Underpowered).unwrap(),
+        "local"
     );
 }
 

@@ -8,7 +8,7 @@ use globset::Glob;
 use super::schema::{RawConfig, RawDimensionDeltas, RawRule, ValidatedConfig, ValidatedRule};
 use crate::config::schema::TimeoutMillis;
 use crate::error::AppError;
-use crate::routing::{ClassifierMode, FastMode, ModelFamily, ReasoningLevel, Weights};
+use crate::routing::{FastMode, ModelFamily, ReasoningLevel, Weights};
 
 fn invalid(
     file: &Path,
@@ -38,26 +38,31 @@ pub fn validate_layer(raw: &RawConfig, file: &Path) -> Result<(), AppError> {
             "Set version = 1.",
         ));
     }
-    if let Some(value) = &raw.classifier {
-        ClassifierMode::from_str(value).map_err(|_| {
-            invalid(
-                file,
-                "classifier",
-                value,
-                "auto, always, or never",
-                "Use classifier = \"auto\" for the default behavior.",
-            )
-        })?;
+    if let Some(value) = &raw.legacy_classifier {
+        return Err(invalid(
+            file,
+            "classifier",
+            value,
+            "the key to be absent",
+            "Classifier settings were removed in cauto 0.3; delete this key. Routing is now local-only.",
+        ));
     }
-    if let Some(value) = raw.classifier_confidence_threshold
-        && (!value.is_finite() || !(0.0..=1.0).contains(&value))
-    {
+    if let Some(value) = raw.legacy_classifier_confidence_threshold {
         return Err(invalid(
             file,
             "classifier_confidence_threshold",
             value.to_string(),
-            "a finite number from 0.0 through 1.0",
-            "Use 0.72 for the default threshold.",
+            "the key to be absent",
+            "Classifier settings were removed in cauto 0.3; delete this key. Routing is now local-only.",
+        ));
+    }
+    if let Some(value) = raw.legacy_classifier_timeout_seconds {
+        return Err(invalid(
+            file,
+            "classifier_timeout_seconds",
+            value.to_string(),
+            "the key to be absent",
+            "Classifier settings were removed in cauto 0.3; delete this key. Routing is now local-only.",
         ));
     }
     if raw.log_raw_prompts == Some(true) {
@@ -83,13 +88,6 @@ pub fn validate_layer(raw: &RawConfig, file: &Path) -> Result<(), AppError> {
         raw.catalog_timeout_ms,
         100,
         60_000,
-    )?;
-    validate_optional_range(
-        file,
-        "classifier_timeout_seconds",
-        raw.classifier_timeout_seconds,
-        1,
-        600,
     )?;
     if let Some(points) = raw.hysteresis_points
         && points > 20
@@ -321,14 +319,6 @@ fn parse_optional_effort(
 pub fn into_validated(raw: RawConfig, file: &Path) -> Result<ValidatedConfig, AppError> {
     validate_layer(&raw, file)?;
     let defaults = ValidatedConfig::default();
-    let classifier = raw
-        .classifier
-        .as_deref()
-        .map(ClassifierMode::from_str)
-        .transpose()
-        .map_err(|message| invalid(file, "classifier", message, "a valid mode", "Use auto."))?
-        .unwrap_or(defaults.classifier);
-    let threshold = raw.classifier_confidence_threshold.unwrap_or(0.72);
     let default_effort = raw
         .default_effort
         .as_deref()
@@ -425,8 +415,6 @@ pub fn into_validated(raw: RawConfig, file: &Path) -> Result<ValidatedConfig, Ap
         });
     }
     Ok(ValidatedConfig {
-        classifier,
-        classifier_confidence_threshold_basis_points: (threshold * 10_000.0).round() as u16,
         default_model: raw.default_model.unwrap_or(defaults.default_model),
         default_effort,
         fast_mode,
@@ -439,10 +427,6 @@ pub fn into_validated(raw: RawConfig, file: &Path) -> Result<ValidatedConfig, Ap
             .expect("validated non-zero timeout"),
         catalog_timeout: TimeoutMillis::new(raw.catalog_timeout_ms.unwrap_or(2_500))
             .expect("validated non-zero timeout"),
-        classifier_timeout: TimeoutMillis::new(
-            raw.classifier_timeout_seconds.unwrap_or(45) * 1_000,
-        )
-        .expect("validated non-zero timeout"),
         hysteresis_points: raw.hysteresis_points.unwrap_or(0),
         weights,
         rules,

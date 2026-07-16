@@ -18,6 +18,10 @@ const APP_SERVER_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const RELAY_POLL: Duration = Duration::from_millis(8);
 
 pub(crate) trait MessageInterceptor {
+    fn negotiated(&mut self, _capabilities: &NegotiatedCapabilities) -> Result<(), AppError> {
+        Ok(())
+    }
+
     fn client_message(&mut self, message: &mut Value) -> Result<Vec<Value>, AppError>;
 
     fn server_message(&mut self, message: &Value) -> Result<Vec<Value>, AppError>;
@@ -29,9 +33,10 @@ pub(crate) struct ProcessConfig {
     pub profile: Option<String>,
     pub tui_args: Vec<OsString>,
     pub verbose: bool,
+    pub codex_version: String,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub(crate) struct NegotiatedCapabilities {
     pub model_count: usize,
     pub collaboration_mode_count: usize,
@@ -39,6 +44,7 @@ pub(crate) struct NegotiatedCapabilities {
     pub namespace_tools: bool,
     pub image_generation: bool,
     pub web_search: bool,
+    pub model_catalog: crate::codex::catalog::ModelCatalog,
 }
 
 struct ChildGuard {
@@ -185,7 +191,42 @@ fn array_len(result: &Value, method: &str) -> Result<usize, AppError> {
         .ok_or_else(|| AppError::AppServer(format!("{method} returned an invalid data array")))
 }
 
-pub(crate) fn negotiate(endpoint: &str) -> Result<NegotiatedCapabilities, AppError> {
+fn request_all_models<S: Read + Write>(socket: &mut WebSocket<S>) -> Result<Value, AppError> {
+    let mut data = Vec::new();
+    let mut cursor: Option<String> = None;
+    for page in 0..10 {
+        let mut params = json!({ "limit": 200, "includeHidden": true });
+        if let Some(cursor) = &cursor {
+            params["cursor"] = Value::String(cursor.clone());
+        }
+        let result = request(
+            socket,
+            &format!("cauto:models:{page}"),
+            "model/list",
+            params,
+        )?;
+        let page_data = result
+            .get("data")
+            .and_then(Value::as_array)
+            .ok_or_else(|| AppError::AppServer("model/list returned invalid data".into()))?;
+        data.extend(page_data.iter().cloned());
+        cursor = result
+            .get("nextCursor")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        if cursor.is_none() {
+            return Ok(json!({ "data": data }));
+        }
+    }
+    Err(AppError::AppServer(
+        "model/list exceeded the 10-page safety bound".into(),
+    ))
+}
+
+pub(crate) fn negotiate(
+    endpoint: &str,
+    codex_version: &str,
+) -> Result<NegotiatedCapabilities, AppError> {
     let mut socket = connect_with_retry(endpoint)?;
     let _ = request(
         &mut socket,
@@ -206,12 +247,7 @@ pub(crate) fn negotiate(endpoint: &str) -> Result<NegotiatedCapabilities, AppErr
         &mut socket,
         &json!({ "method": "initialized", "params": {} }),
     )?;
-    let models = request(
-        &mut socket,
-        "cauto:models",
-        "model/list",
-        json!({ "limit": 200, "includeHidden": true }),
-    )?;
+    let models = request_all_models(&mut socket)?;
     let collaboration_modes = request(
         &mut socket,
         "cauto:collaboration-modes",
@@ -231,6 +267,9 @@ pub(crate) fn negotiate(endpoint: &str) -> Result<NegotiatedCapabilities, AppErr
         json!({ "limit": 200 }),
     )?;
     let _ = socket.close(None);
+    let model_catalog =
+        crate::codex::catalog::parse_app_server_models(models.clone(), codex_version)
+            .map_err(|error| AppError::CatalogParse(error.to_string()))?;
     Ok(NegotiatedCapabilities {
         model_count: array_len(&models, "model/list")?,
         collaboration_mode_count: array_len(&collaboration_modes, "collaborationMode/list")?,
@@ -247,6 +286,7 @@ pub(crate) fn negotiate(endpoint: &str) -> Result<NegotiatedCapabilities, AppErr
             .get("webSearch")
             .and_then(Value::as_bool)
             .unwrap_or(false),
+        model_catalog,
     })
 }
 
@@ -387,12 +427,12 @@ fn relay<I: MessageInterceptor>(
                 progressed = true;
                 let closing = matches!(message, Message::Close(_));
                 let (message, synthetic) = transform_client(message, interceptor)?;
-                for value in synthetic {
-                    send_json(&mut client, &value)?;
-                }
                 target
                     .send(message)
                     .map_err(|error| app_error("failed forwarding TUI request", error))?;
+                for value in synthetic {
+                    send_json(&mut client, &value)?;
+                }
                 if closing {
                     return Ok(());
                 }
@@ -405,10 +445,11 @@ fn relay<I: MessageInterceptor>(
             Ok(message) => {
                 progressed = true;
                 let closing = matches!(message, Message::Close(_));
-                let synthetic = inspect_server(&message, interceptor)?;
+                let inspectable = message.clone();
                 client
                     .send(message)
                     .map_err(|error| app_error("failed forwarding App Server event", error))?;
+                let synthetic = inspect_server(&inspectable, interceptor)?;
                 for value in synthetic {
                     send_json(&mut client, &value)?;
                 }
@@ -433,7 +474,8 @@ pub(crate) fn run<I: MessageInterceptor>(
     let (proxy_listener, proxy_endpoint) = reserve_endpoint()?;
     let target_endpoint = unused_endpoint()?;
     let _server = spawn_app_server(&config, &target_endpoint)?;
-    let capabilities = negotiate(&target_endpoint)?;
+    let capabilities = negotiate(&target_endpoint, &config.codex_version)?;
+    interceptor.negotiated(&capabilities)?;
     let mut tui = spawn_tui(&config, &proxy_endpoint)?;
     let client = accept_tui(&proxy_listener, &mut tui)?;
     let target = connect_with_retry(&target_endpoint)?;

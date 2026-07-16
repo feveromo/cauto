@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+## 0.3.0 - 2026-07-16
+
+- Remove the hidden model classifier and all classifier CLI/config controls;
+  prompt submission now performs local Rust routing only.
+- Prepare repository context, config, compiled rules, calibration, and model
+  capabilities before the adaptive TUI accepts input, leaving only bounded
+  in-memory work on the first-turn hot path.
+- Preserve Codex's native first-turn model and effort when local evidence is
+  insufficient, then pin that route without treating it as calibration data.
+- Recognize project/codebase explanation requests locally and route them to
+  Luna/Low without a second model call.
+- Add route provenance and p50/p95/max routing latency to decision history and
+  reports; retain classifier rates only as explicitly labeled legacy metrics.
+- Negotiate the complete live App Server model catalog and use it for adaptive
+  route capability checks.
+- Add a capability-gated `info` notification for calm route confirmations;
+  older Codex clients remain silent and real failures continue to warn.
+- Relay real App Server requests and responses before cosmetic route notices or
+  decision logging.
+
 - Restore blocking mode on accepted adaptive-agent TUI sockets before the
   WebSocket handshake, preventing transient macOS `EAGAIN` failures during MCP
   startup and allowing Codex to restore the terminal cleanly on exit.

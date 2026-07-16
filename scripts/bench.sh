@@ -33,17 +33,17 @@ typical_prompt="benchmark phrase 050 c update src/module050/file.rs with exact e
 large_prompt_file="$work/large-prompt.txt"
 awk 'BEGIN { for (i = 0; i < 386; i++) printf "benchmark phrase %03d a inspect src/module%03d/file.rs ", (i % 100) + 1, (i % 100) + 1 }' > "$large_prompt_file"
 
-"$binary" --repo "$repo" --no-classifier --dry-run "$typical_prompt" >/dev/null
+"$binary" --repo "$repo" --dry-run "$typical_prompt" >/dev/null
 "$binary" --repo "$repo" --json models >/dev/null
 
 help_command="$binary --help >/dev/null"
-explain_command="$binary --repo $repo explain --no-classifier '$typical_prompt' >/dev/null"
-dry_command="$binary --repo $repo --no-classifier --dry-run '$typical_prompt' >/dev/null"
-large_command="$binary --repo $repo --no-classifier --dry-run --prompt-file $large_prompt_file >/dev/null"
+explain_command="$binary --repo $repo explain '$typical_prompt' >/dev/null"
+dry_command="$binary --repo $repo --dry-run '$typical_prompt' >/dev/null"
+large_command="$binary --repo $repo --dry-run --prompt-file $large_prompt_file >/dev/null"
 catalog_command="$binary --repo $repo --json models >/dev/null"
-route_exec_command="$binary --repo $repo --no-classifier --dry-run --print-command '$typical_prompt' >/dev/null"
+route_exec_command="$binary --repo $repo --dry-run --print-command '$typical_prompt' >/dev/null"
 
-echo "Classifier and final Codex runtime are excluded from every timed route."
+echo "Final Codex runtime is excluded from every timed route."
 if command -v hyperfine >/dev/null 2>&1; then
   hyperfine --warmup 10 --runs 50 \
     --command-name help "$help_command" \
@@ -62,15 +62,16 @@ else
     "$binary" bench-process --iterations "$iterations" "$binary" -- "$@"
   }
   measure help 100 --help
-  measure explain 50 --repo "$repo" explain --no-classifier "$typical_prompt"
-  measure dry-run 50 --repo "$repo" --no-classifier --dry-run "$typical_prompt"
-  measure large-prompt 30 --repo "$repo" --no-classifier --dry-run --prompt-file "$large_prompt_file"
+  measure explain 50 --repo "$repo" explain "$typical_prompt"
+  measure dry-run 50 --repo "$repo" --dry-run "$typical_prompt"
+  measure large-prompt 30 --repo "$repo" --dry-run --prompt-file "$large_prompt_file"
   measure cached-catalog 50 --repo "$repo" --json models
-  measure route-to-command 50 --repo "$repo" --no-classifier --dry-run --print-command "$typical_prompt"
+  measure route-to-command 50 --repo "$repo" --dry-run --print-command "$typical_prompt"
 fi
 
 catalog_file="$(find "$XDG_CACHE_HOME/cauto/catalogs" -type f -name '*.json' | head -n 1)"
 "$binary" bench-core --policy "$policy" --catalog "$catalog_file" --iterations 1000
+"$binary" --repo "$repo" bench-agent-route --iterations 1000
 "$binary" bench-score --iterations 10000000
 if stat -c '%s' "$binary" >/dev/null 2>&1; then
   echo "release_binary_bytes=$(stat -c '%s' "$binary")"

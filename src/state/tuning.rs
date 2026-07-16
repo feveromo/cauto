@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::cache::atomic_write;
 use crate::error::AppError;
-use crate::routing::ScoreCalibration;
+use crate::routing::{RouteSource, ScoreCalibration};
 
 use super::decision_log::{DecisionRecord, timestamp_now};
 
@@ -75,6 +75,7 @@ pub struct RepositoryTuning {
     pub feedback: FeedbackCounts,
     pub eligible_feedback_count: u64,
     pub previews_excluded: u64,
+    pub native_preserved_excluded: u64,
     pub eligible: bool,
     pub current_calibration: Option<i8>,
     pub proposed_calibration: Option<i8>,
@@ -93,6 +94,7 @@ struct DecisionInfo {
     repository_identifier: String,
     repository_name: String,
     preview: bool,
+    native_preserved: bool,
 }
 
 pub fn load_store(path: &Path) -> Result<CalibrationStore, AppError> {
@@ -232,10 +234,11 @@ pub fn analyze_repository(
                 repository_identifier: record.repository_identifier,
                 repository_name: record.repository_name,
                 preview: record.decision_mode == "preview",
+                native_preserved: record.route_source == RouteSource::NativePreserved,
             },
         );
     }
-    let mut counts: BTreeMap<String, (String, FeedbackCounts, u64)> = BTreeMap::new();
+    let mut counts: BTreeMap<String, (String, FeedbackCounts, u64, u64)> = BTreeMap::new();
     for value in &values {
         if value.get("record_type").and_then(serde_json::Value::as_str) != Some("feedback") {
             continue;
@@ -254,10 +257,15 @@ pub fn analyze_repository(
                     decision.repository_name.clone(),
                     FeedbackCounts::default(),
                     0,
+                    0,
                 )
             });
         if decision.preview {
             entry.2 += 1;
+            continue;
+        }
+        if decision.native_preserved {
+            entry.3 += 1;
             continue;
         }
         match value.get("feedback").and_then(serde_json::Value::as_str) {
@@ -271,7 +279,7 @@ pub fn analyze_repository(
     if let Some((id, name)) = repository_filter {
         counts
             .entry(id.to_owned())
-            .or_insert_with(|| (name.to_owned(), FeedbackCounts::default(), 0));
+            .or_insert_with(|| (name.to_owned(), FeedbackCounts::default(), 0, 0));
     } else {
         for (id, calibration) in &store.repositories {
             let _ = calibration;
@@ -280,12 +288,13 @@ pub fn analyze_repository(
                     names.get(id).cloned().unwrap_or_else(|| "unknown".into()),
                     FeedbackCounts::default(),
                     0,
+                    0,
                 )
             });
         }
     }
     let mut repositories = Vec::new();
-    for (id, (name, feedback, previews_excluded)) in counts {
+    for (id, (name, feedback, previews_excluded, native_preserved_excluded)) in counts {
         if repository_filter.is_some_and(|(filter, _)| id != filter) {
             continue;
         }
@@ -301,6 +310,7 @@ pub fn analyze_repository(
             eligible_feedback_count: feedback.eligible_total(),
             feedback,
             previews_excluded,
+            native_preserved_excluded,
             eligible,
             current_calibration: current,
             proposed_calibration: proposed,
