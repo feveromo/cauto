@@ -286,6 +286,9 @@ pub fn route(
         family = ModelFamily::Sol;
     }
     effort = apply_effort_constraints(effort, &constraints, &mut conflicts);
+    if effort == ReasoningLevel::Ultra && constraints.explicit_family.is_none() {
+        family = ModelFamily::Sol;
+    }
     if effort == ReasoningLevel::Ultra && !constraints.ultra_authorized {
         conflicts.push(Conflict {
             kind: "ultra-authorization".into(),
@@ -370,5 +373,26 @@ mod tests {
         );
         assert_eq!(decision.recommended_family, ModelFamily::Luna);
         assert_eq!(decision.recommended_effort, ReasoningLevel::Low);
+    }
+
+    #[test]
+    fn explicit_ultra_selects_sol_without_a_family_override() {
+        let decision = route(
+            TaskType::Mechanical,
+            DimensionScores::default(),
+            Weights::default(),
+            SelectionConstraints {
+                explicit_effort: Some(ReasoningLevel::Ultra),
+                ultra_authorized: true,
+                ..SelectionConstraints::default()
+            },
+            vec![],
+            vec![],
+            EvidenceQuality::default(),
+            vec![],
+            vec![],
+        );
+        assert_eq!(decision.recommended_family, ModelFamily::Sol);
+        assert_eq!(decision.recommended_effort, ReasoningLevel::Ultra);
     }
 }

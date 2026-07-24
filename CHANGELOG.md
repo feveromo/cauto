@@ -6,6 +6,15 @@
   and thread pin state. Use native informational notices when supported and a
   compatible visible fallback otherwise; `--quiet` suppresses success notices
   without hiding routing or persistence failures.
+- Add a semantic refinement stage for open-ended repository work, compound
+  tasks, cross-platform behavior, performance, state compatibility, security,
+  and concurrency instead of relying on prompt substrings and length alone.
+- Add post-score reasoning floors so correlated high-risk dimensions cannot be
+  diluted into Medium by the weighted average. Explicit effort choices and
+  validated policy ceilings still win.
+- Make `cauto explain` show the inferred task type and complete dimension trace,
+  and add a routing-quality corpus covering cheap, ordinary, broad, and
+  high-consequence tasks.
 - Keep bounded helper output draining after its capture limit, isolate helper
   subprocesses into Unix process groups, and clean up descendants after parent
   exit, timeout, or wait failure so they cannot stall catalog or version
