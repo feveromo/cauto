@@ -19,7 +19,7 @@ use crate::routing::{
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
 #[cfg(unix)]
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct DecisionRecord {
@@ -238,6 +238,12 @@ pub fn append_json_line(path: &Path, bytes: &[u8]) -> Result<(), AppError> {
         path: path.to_path_buf(),
         message: error.to_string(),
     })?;
+    #[cfg(unix)]
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))
+        .map_err(|error| AppError::State {
+            path: path.to_path_buf(),
+            message: format!("failed to secure decision log: {error}"),
+        })?;
     let start = Instant::now();
     loop {
         match File::try_lock(&file) {

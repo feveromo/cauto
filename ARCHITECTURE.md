@@ -97,6 +97,11 @@ fallback. Agent startup separately negotiates the live App Server model list
 before opening the TUI. Additive catalog fields are ignored. The fallback knows
 Sol/Terra/Luna IDs but never claims Max or Ultra.
 
+Bounded helper probes retain at most 16 MiB from each output stream while still
+draining the pipes to EOF. On Unix they run in separate process groups so a
+timeout or wait failure terminates the full helper tree, and descendants cannot
+outlive a successfully completed parent while retaining its pipes.
+
 Cache envelopes include schema/cauto/Codex versions, fingerprint, `CODEX_HOME`
 hash, profile, timestamps, source, payload SHA-256, and catalog. Fresh cache
 returns immediately. Missing, stale, and explicit refreshes share a bounded
@@ -139,12 +144,12 @@ generic baseline is reported directly and should trigger a deterministic
 feature or policy correction rather than repetitive user feedback.
 
 Applied calibration uses a separate versioned
-`~/.local/state/cauto/calibration.json` store keyed only by repository hash.
-Entries contain the bounded offset, direction, aggregate counts, and timestamp;
-they contain no prompts. Atomic same-directory replacement and user-only modes
-match cache/state durability rules. Parsing failure is non-fatal on the launch
-path and yields baseline routing. `cauto tune --reset` removes only the selected
-repository entry.
+`calibration.json` in the platform-native state directory, keyed only by
+repository hash. Entries contain the bounded offset, direction, aggregate
+counts, and timestamp; they contain no prompts. Atomic same-directory
+replacement and user-only modes match cache/state durability rules. Parsing
+failure is non-fatal on the launch path and yields baseline routing.
+`cauto tune --reset` removes only the selected repository entry.
 
 ## Launch Boundary
 
@@ -164,9 +169,11 @@ parent. Non-Unix uses inherited stdio and propagates the child status.
 `cauto agent` starts a native `codex app-server` on an ephemeral loopback
 endpoint, negotiates `initialize`, `model/list`, `collaborationMode/list`,
 provider capabilities, and experimental features, then launches native Codex
-with `--remote` pointed at cauto's separately reserved loopback endpoint. The
-control connection closes after negotiation; the TUI connection remains a
-transparent full-duplex relay.
+with `--remote` pointed at cauto's separately reserved loopback endpoint. Retry
+loops observe the App Server child and stop immediately if it exits, including
+while the TUI is completing interactive preflight. The control connection
+closes after negotiation; the TUI connection remains a transparent full-duplex
+relay.
 
 Only the first client `turn/start` text request for a new thread is routed and
 logged, after App Server accepts it. Both top-level model/effort and

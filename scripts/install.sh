@@ -49,8 +49,8 @@ run() {
 
 if ! "$skip_tests"; then
   run cargo fmt --check
-  run cargo clippy --all-targets --all-features -- -D warnings
-  run cargo test --all-targets --all-features
+  run cargo clippy --all-targets --all-features --locked -- -D warnings
+  run cargo test --all-targets --all-features --locked
 fi
 
 run cargo install --path . --locked --force

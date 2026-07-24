@@ -31,6 +31,11 @@ jobs:
       - name: Prepare Rust toolchain
         run: rustup component add rustfmt clippy
 
+      - name: Check shell scripts
+        run: |
+          bash -n scripts/*.sh
+          bash scripts/install.sh --dry-run --skip-tests
+
       - name: Check formatting
         run: cargo fmt --check
 

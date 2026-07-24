@@ -15,8 +15,10 @@ use crate::error::AppError;
 use std::os::unix::ffi::OsStrExt;
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 
-const MAX_PROCESS_OUTPUT: u64 = 16 * 1024 * 1024;
+const MAX_PROCESS_OUTPUT: usize = 16 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
 pub struct CodexInstallation {
@@ -59,10 +61,40 @@ pub trait ProcessRunner {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct NativeProcessRunner;
 
-fn read_bounded<R: Read>(reader: R) -> std::io::Result<Vec<u8>> {
+fn read_bounded<R: Read>(mut reader: R) -> std::io::Result<Vec<u8>> {
     let mut bytes = Vec::new();
-    reader.take(MAX_PROCESS_OUTPUT).read_to_end(&mut bytes)?;
+    let mut buffer = [0_u8; 8 * 1024];
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        let retained = read.min(MAX_PROCESS_OUTPUT.saturating_sub(bytes.len()));
+        bytes.extend_from_slice(&buffer[..retained]);
+    }
     Ok(bytes)
+}
+
+#[cfg(unix)]
+fn kill_process_group(child: &std::process::Child) -> bool {
+    use nix::sys::signal::{Signal, killpg};
+    use nix::unistd::Pid;
+
+    killpg(Pid::from_raw(child.id() as i32), Signal::SIGKILL).is_ok()
+}
+
+#[cfg(unix)]
+fn terminate(child: &mut std::process::Child) {
+    if !kill_process_group(child) {
+        let _ = child.kill();
+    }
+    let _ = child.wait();
+}
+
+#[cfg(not(unix))]
+fn terminate(child: &mut std::process::Child) {
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 impl ProcessRunner for NativeProcessRunner {
@@ -79,21 +111,34 @@ impl ProcessRunner for NativeProcessRunner {
         for (key, value) in &request.environment {
             command.env(key, value);
         }
+        #[cfg(unix)]
+        command.process_group(0);
         let mut child = command.spawn()?;
         let stdout = child.stdout.take().expect("piped stdout is available");
         let stderr = child.stderr.take().expect("piped stderr is available");
         let stdout_reader = std::thread::spawn(move || read_bounded(stdout));
         let stderr_reader = std::thread::spawn(move || read_bounded(stderr));
-        let status = match child.wait_timeout(request.timeout)? {
-            Some(status) => status,
-            None => {
-                let _ = child.kill();
-                let _ = child.wait();
+        let status = match child.wait_timeout(request.timeout) {
+            Ok(Some(status)) => status,
+            Ok(None) => {
+                terminate(&mut child);
                 let _ = stdout_reader.join();
                 let _ = stderr_reader.join();
                 return Err(ProcessError::Timeout(request.timeout.as_millis()));
             }
+            Err(error) => {
+                terminate(&mut child);
+                let _ = stdout_reader.join();
+                let _ = stderr_reader.join();
+                return Err(ProcessError::Io(error));
+            }
         };
+        #[cfg(unix)]
+        {
+            // A helper may exit after spawning a background descendant that still
+            // owns the pipes. Bounded probes must not outlive their direct child.
+            let _ = kill_process_group(&child);
+        }
         let stdout = stdout_reader
             .join()
             .map_err(|_| std::io::Error::other("stdout reader panicked"))??;
@@ -258,4 +303,91 @@ pub fn resolve(
         codex_home,
         profile: profile.map(str::to_owned),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    #[cfg(unix)]
+    use std::time::Instant;
+
+    use super::*;
+
+    struct CountingReader {
+        remaining: usize,
+        consumed: Arc<AtomicUsize>,
+    }
+
+    impl Read for CountingReader {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            let read = buffer.len().min(self.remaining);
+            buffer[..read].fill(b'x');
+            self.remaining -= read;
+            self.consumed.fetch_add(read, Ordering::Relaxed);
+            Ok(read)
+        }
+    }
+
+    #[test]
+    fn bounded_output_is_truncated_but_fully_drained() {
+        let total = MAX_PROCESS_OUTPUT + 4 * 1024;
+        let consumed = Arc::new(AtomicUsize::new(0));
+        let output = read_bounded(CountingReader {
+            remaining: total,
+            consumed: Arc::clone(&consumed),
+        })
+        .unwrap();
+
+        assert_eq!(output.len(), MAX_PROCESS_OUTPUT);
+        assert_eq!(consumed.load(Ordering::Relaxed), total);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn completed_parent_does_not_leave_background_pipe_holders() {
+        let request = ProcessRequest {
+            program: PathBuf::from("/bin/sh"),
+            args: vec![
+                OsString::from("-c"),
+                OsString::from("(trap '' HUP; sleep 5) & exit 0"),
+            ],
+            current_dir: None,
+            environment: Vec::new(),
+            timeout: Duration::from_secs(2),
+        };
+        let started = Instant::now();
+
+        let output = NativeProcessRunner.run(&request).unwrap();
+
+        assert_eq!(output.status_code, Some(0));
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "background descendant kept the completed helper's pipes open"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn timeout_terminates_descendants_that_hold_output_pipes() {
+        let request = ProcessRequest {
+            program: PathBuf::from("/bin/sh"),
+            args: vec![OsString::from("-c"), OsString::from("sleep 5 & wait")],
+            current_dir: None,
+            environment: Vec::new(),
+            timeout: Duration::from_millis(50),
+        };
+        let started = Instant::now();
+
+        let error = NativeProcessRunner.run(&request).unwrap_err();
+
+        assert!(matches!(error, ProcessError::Timeout(_)));
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "timeout waited for a descendant that inherited the output pipes"
+        );
+    }
 }

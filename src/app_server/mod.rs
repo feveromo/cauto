@@ -8,6 +8,9 @@ use std::process::{Child, Command, ExitCode, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[cfg(unix)]
+use std::os::unix::process::ExitStatusExt;
+
 use serde_json::{Value, json};
 use tungstenite::stream::MaybeTlsStream;
 use tungstenite::{Message, WebSocket};
@@ -49,17 +52,24 @@ pub(crate) struct NegotiatedCapabilities {
 
 struct ChildGuard {
     child: Child,
+    name: &'static str,
 }
 
 impl ChildGuard {
-    fn new(child: Child) -> Self {
-        Self { child }
+    fn new(child: Child, name: &'static str) -> Self {
+        Self { child, name }
+    }
+
+    fn try_wait(&mut self) -> Result<Option<std::process::ExitStatus>, AppError> {
+        self.child
+            .try_wait()
+            .map_err(|error| app_error(&format!("failed to inspect {}", self.name), error))
     }
 
     fn wait(&mut self) -> Result<std::process::ExitStatus, AppError> {
         self.child
             .wait()
-            .map_err(|error| AppError::AppServer(format!("failed waiting for Codex TUI: {error}")))
+            .map_err(|error| app_error(&format!("failed waiting for {}", self.name), error))
     }
 }
 
@@ -117,18 +127,29 @@ fn spawn_app_server(config: &ProcessConfig, endpoint: &str) -> Result<ChildGuard
         path: config.binary.clone(),
         source,
     })?;
-    Ok(ChildGuard::new(child))
+    Ok(ChildGuard::new(child, "Codex App Server"))
 }
 
-fn connect_with_retry(endpoint: &str) -> Result<WebSocket<MaybeTlsStream<TcpStream>>, AppError> {
+fn connect_with_retry(
+    endpoint: &str,
+    server: &mut ChildGuard,
+) -> Result<WebSocket<MaybeTlsStream<TcpStream>>, AppError> {
     let started = Instant::now();
     loop {
         match tungstenite::connect(endpoint) {
             Ok((socket, _)) => return Ok(socket),
-            Err(_) if started.elapsed() < APP_SERVER_CONNECT_TIMEOUT => {
+            Err(error) => {
+                if let Some(status) = server.try_wait()? {
+                    return Err(AppError::AppServer(format!(
+                        "{} exited before accepting connections ({status})",
+                        server.name
+                    )));
+                }
+                if started.elapsed() >= APP_SERVER_CONNECT_TIMEOUT {
+                    return Err(app_error("App Server did not become ready", error));
+                }
                 thread::sleep(Duration::from_millis(25));
             }
-            Err(error) => return Err(app_error("App Server did not become ready", error)),
         }
     }
 }
@@ -223,11 +244,12 @@ fn request_all_models<S: Read + Write>(socket: &mut WebSocket<S>) -> Result<Valu
     ))
 }
 
-pub(crate) fn negotiate(
+fn negotiate(
     endpoint: &str,
     codex_version: &str,
+    server: &mut ChildGuard,
 ) -> Result<NegotiatedCapabilities, AppError> {
-    let mut socket = connect_with_retry(endpoint)?;
+    let mut socket = connect_with_retry(endpoint, server)?;
     let _ = request(
         &mut socket,
         "cauto:initialize",
@@ -308,12 +330,13 @@ fn spawn_tui(config: &ProcessConfig, endpoint: &str) -> Result<ChildGuard, AppEr
         path: config.binary.clone(),
         source,
     })?;
-    Ok(ChildGuard::new(child))
+    Ok(ChildGuard::new(child, "Codex TUI"))
 }
 
 fn accept_tui(
     listener: &TcpListener,
     tui: &mut ChildGuard,
+    server: &mut ChildGuard,
 ) -> Result<WebSocket<TcpStream>, AppError> {
     listener
         .set_nonblocking(true)
@@ -331,13 +354,14 @@ fn accept_tui(
                 return Ok(socket);
             }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                if let Some(status) = tui
-                    .child
-                    .try_wait()
-                    .map_err(|error| app_error("failed to inspect Codex TUI", error))?
-                {
+                if let Some(status) = tui.try_wait()? {
                     return Err(AppError::AppServer(format!(
                         "Codex TUI exited before connecting to the proxy ({status})"
+                    )));
+                }
+                if let Some(status) = server.try_wait()? {
+                    return Err(AppError::AppServer(format!(
+                        "Codex App Server exited while waiting for the TUI ({status})"
                     )));
                 }
                 // Codex can present update, authentication, or other preflight
@@ -467,25 +491,34 @@ fn relay<I: MessageInterceptor>(
     }
 }
 
+fn status_exit_code(status: std::process::ExitStatus) -> u8 {
+    if let Some(code) = status.code().and_then(|value| u8::try_from(value).ok()) {
+        return code;
+    }
+    #[cfg(unix)]
+    if let Some(signal) = status.signal()
+        && let Ok(code) = u8::try_from(128 + signal)
+    {
+        return code;
+    }
+    1
+}
+
 pub(crate) fn run<I: MessageInterceptor>(
     config: ProcessConfig,
     interceptor: &mut I,
 ) -> Result<(ExitCode, NegotiatedCapabilities), AppError> {
     let (proxy_listener, proxy_endpoint) = reserve_endpoint()?;
     let target_endpoint = unused_endpoint()?;
-    let _server = spawn_app_server(&config, &target_endpoint)?;
-    let capabilities = negotiate(&target_endpoint, &config.codex_version)?;
+    let mut server = spawn_app_server(&config, &target_endpoint)?;
+    let capabilities = negotiate(&target_endpoint, &config.codex_version, &mut server)?;
     interceptor.negotiated(&capabilities)?;
     let mut tui = spawn_tui(&config, &proxy_endpoint)?;
-    let client = accept_tui(&proxy_listener, &mut tui)?;
-    let target = connect_with_retry(&target_endpoint)?;
+    let client = accept_tui(&proxy_listener, &mut tui, &mut server)?;
+    let target = connect_with_retry(&target_endpoint, &mut server)?;
     relay(client, target, interceptor)?;
     let status = tui.wait()?;
-    let code = status
-        .code()
-        .and_then(|value| u8::try_from(value).ok())
-        .unwrap_or(1);
-    Ok((ExitCode::from(code), capabilities))
+    Ok((ExitCode::from(status_exit_code(status)), capabilities))
 }
 
 #[cfg(test)]
@@ -557,5 +590,33 @@ mod tests {
             started.elapsed() >= Duration::from_millis(10),
             "configured stream returned immediately instead of waiting for its read timeout"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn connection_retry_stops_when_app_server_exits() {
+        let endpoint = unused_endpoint().unwrap();
+        let child = Command::new("sh").args(["-c", "exit 23"]).spawn().unwrap();
+        let mut server = ChildGuard::new(child, "test App Server");
+        let started = Instant::now();
+
+        let error = connect_with_retry(&endpoint, &mut server).unwrap_err();
+
+        assert!(error.to_string().contains("exited before accepting"));
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "retry loop ignored the exited App Server child"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn signaled_tui_status_uses_shell_exit_convention() {
+        let status = Command::new("sh")
+            .args(["-c", "kill -TERM $$"])
+            .status()
+            .unwrap();
+
+        assert_eq!(status_exit_code(status), 143);
     }
 }

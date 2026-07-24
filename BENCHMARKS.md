@@ -9,6 +9,9 @@ directory, and final Codex runtime was excluded.
 
 The synthetic project contained 100 rules, 500 phrases, and 100 path globs.
 The normal prompt was about 80 bytes and the large prompt was 20,458 bytes.
+The benchmark script isolates cauto's config, cache, and state under a temporary
+home on macOS or temporary XDG directories on Linux while preserving the real
+`CODEX_HOME` used by the installed CLI.
 
 | Operation | Iterations | Median | Mean | p95 |
 | --- | ---: | ---: | ---: | ---: |

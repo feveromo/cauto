@@ -131,7 +131,8 @@ and Ultra are never aliases for `xhigh`.
 
 Configuration is loaded from:
 
-1. `~/.config/cauto/config.toml`
+1. The platform config directory, defaulting to `~/.config/cauto/config.toml`
+   on Linux or `~/Library/Application Support/cauto/config.toml` on macOS
 2. `<repo-root>/.cauto.toml`
 
 CLI and explicit native overrides are applied above those typed layers. Project
@@ -226,11 +227,14 @@ successful route notices; routing and persistence failures remain visible.
 
 ## Privacy And History
 
-Raw prompts are never stored. Decision records under
-`~/.local/state/cauto/decisions.jsonl` contain a SHA-256 prompt digest, byte
-length, bounded scores, rule IDs, selected capability, outcome category, and
-sanitized argv with the prompt removed. Unknown `-c` values are redacted.
-Cache/state directories and files use user-only permissions where supported.
+Raw prompts are never stored. Decision records use the platform state
+directory, defaulting to `~/.local/state/cauto/decisions.jsonl` on Linux or
+`~/Library/Application Support/cauto/decisions.jsonl` on macOS. They contain a
+SHA-256 prompt digest, byte length, bounded scores, rule IDs, selected
+capability, outcome category, and sanitized argv with the prompt removed.
+Unknown `-c` values are redacted. `cauto doctor` prints the effective config,
+cache, and state paths. Cache/state directories and files use user-only
+permissions where supported.
 
 ```bash
 cauto report
@@ -275,12 +279,12 @@ decisions and feedback attached to previews are excluded.
 Native-preserved decisions are also excluded because cauto cannot learn from a
 route it deliberately did not choose.
 
-Applied values live separately from config and policy in
-`~/.local/state/cauto/calibration.json`. The versioned file contains repository
-identifiers and aggregate counts, never prompts. Writes are atomic and private.
-Use `cauto tune --reset` to remove only the current (or `--repo PATH` selected)
-repository's calibration. A later eligible agent signal may establish a new
-bounded calibration.
+Applied values live separately from config and policy in the platform state
+directory alongside `decisions.jsonl`. The versioned `calibration.json` file
+contains repository identifiers and aggregate counts, never prompts. Writes are
+atomic and private. Use `cauto tune --reset` to remove only the current (or
+`--repo PATH` selected) repository's calibration. A later eligible agent signal
+may establish a new bounded calibration.
 
 Calibration is applied after deterministic feature and rule scoring and before
 family/effort selection and hysteresis. Route output shows the configured and

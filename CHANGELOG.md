@@ -6,6 +6,18 @@
   and thread pin state. Use native informational notices when supported and a
   compatible visible fallback otherwise; `--quiet` suppresses success notices
   without hiding routing or persistence failures.
+- Keep bounded helper output draining after its capture limit, isolate helper
+  subprocesses into Unix process groups, and clean up descendants after parent
+  exit, timeout, or wait failure so they cannot stall catalog or version
+  discovery.
+- Stop App Server connection retries as soon as the child exits, monitor it
+  while the TUI completes preflight, and preserve conventional signal-derived
+  TUI exit codes.
+- Reject non-directory cache/state paths without modifying them, tighten
+  existing decision logs to user-only permissions, and keep installer
+  validation locked to the same dependency graph as CI.
+- Make benchmark isolation, fixture generation, and command quoting portable
+  across Linux and macOS, with shell-script checks on both CI runners.
 
 ## 0.3.0 - 2026-07-16
 

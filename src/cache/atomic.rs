@@ -9,15 +9,33 @@ use crate::error::AppError;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 
 pub fn ensure_private_dir(path: &Path) -> Result<(), AppError> {
-    if !path.exists() {
-        let mut builder = std::fs::DirBuilder::new();
-        builder.recursive(true);
-        #[cfg(unix)]
-        builder.mode(0o700);
-        builder.create(path).map_err(|source| AppError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
+    match std::fs::metadata(path) {
+        Ok(metadata) if !metadata.is_dir() => {
+            return Err(AppError::Io {
+                path: path.to_path_buf(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::NotADirectory,
+                    "private storage path exists but is not a directory",
+                ),
+            });
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let mut builder = std::fs::DirBuilder::new();
+            builder.recursive(true);
+            #[cfg(unix)]
+            builder.mode(0o700);
+            builder.create(path).map_err(|source| AppError::Io {
+                path: path.to_path_buf(),
+                source,
+            })?;
+        }
+        Err(source) => {
+            return Err(AppError::Io {
+                path: path.to_path_buf(),
+                source,
+            });
+        }
     }
     #[cfg(unix)]
     {
@@ -100,4 +118,21 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), AppError> {
     }
     let _ = File::unlock(&lock);
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn private_directory_rejects_an_existing_file() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("storage");
+        std::fs::write(&path, b"keep").unwrap();
+
+        let error = ensure_private_dir(&path).unwrap_err();
+
+        assert!(error.to_string().contains("not a directory"));
+        assert_eq!(std::fs::read(path).unwrap(), b"keep");
+    }
 }

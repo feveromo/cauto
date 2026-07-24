@@ -1,6 +1,9 @@
 use std::ffi::OsString;
 use std::sync::Arc;
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 use cauto::routing::{
     BoundedScore, CapabilitySource, Conflict, DimensionScores, ModelFamily, ReasoningLevel,
     RouteSource, TaskType,
@@ -102,6 +105,21 @@ fn concurrent_loggers_append_complete_json_lines() {
     for line in contents.lines() {
         serde_json::from_str::<DecisionRecord>(line).unwrap();
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn existing_decision_log_permissions_are_tightened() {
+    let root = tempdir().unwrap();
+    let path = root.path().join("decisions.jsonl");
+    std::fs::write(&path, b"existing\n").unwrap();
+    let mut permissions = path.metadata().unwrap().permissions();
+    permissions.set_mode(0o666);
+    std::fs::set_permissions(&path, permissions).unwrap();
+
+    append_json_line(&path, b"next").unwrap();
+
+    assert_eq!(path.metadata().unwrap().permissions().mode() & 0o777, 0o600);
 }
 
 #[test]

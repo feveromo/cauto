@@ -9,16 +9,27 @@ binary="$root/target/release/cauto"
 work="$(mktemp -d "${TMPDIR:-/tmp}/cauto-bench.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
 
+original_home="${HOME:?cauto benchmark: HOME is required}"
+if [[ -z "${CODEX_HOME+x}" ]]; then
+  export CODEX_HOME="$original_home/.codex"
+fi
+export HOME="$work/home"
 export XDG_CONFIG_HOME="$work/config"
 export XDG_CACHE_HOME="$work/cache"
 export XDG_STATE_HOME="$work/state"
 export CAUTO_DISABLE_LOG=1
+mkdir -p "$HOME"
+
+case "$(uname -s)" in
+  Darwin) catalog_dir="$HOME/Library/Caches/cauto/catalogs" ;;
+  *) catalog_dir="$XDG_CACHE_HOME/cauto/catalogs" ;;
+esac
 
 repo="$work/repo"
 mkdir -p "$repo"
 policy="$repo/.cauto.toml"
 printf 'version = 1\n' > "$policy"
-for index in $(seq 1 100); do
+for ((index = 1; index <= 100; index++)); do
   printf '\n[[rules]]\n' >> "$policy"
   printf 'id = "bench-%03d"\n' "$index" >> "$policy"
   printf 'phrases = ["benchmark phrase %03d a", "benchmark phrase %03d b", "benchmark phrase %03d c", "benchmark phrase %03d d", "benchmark phrase %03d e"]\n' \
@@ -36,12 +47,16 @@ awk 'BEGIN { for (i = 0; i < 386; i++) printf "benchmark phrase %03d a inspect s
 "$binary" --repo "$repo" --dry-run "$typical_prompt" >/dev/null
 "$binary" --repo "$repo" --json models >/dev/null
 
-help_command="$binary --help >/dev/null"
-explain_command="$binary --repo $repo explain '$typical_prompt' >/dev/null"
-dry_command="$binary --repo $repo --dry-run '$typical_prompt' >/dev/null"
-large_command="$binary --repo $repo --dry-run --prompt-file $large_prompt_file >/dev/null"
-catalog_command="$binary --repo $repo --json models >/dev/null"
-route_exec_command="$binary --repo $repo --dry-run --print-command '$typical_prompt' >/dev/null"
+export CAUTO_BENCH_BINARY="$binary"
+export CAUTO_BENCH_REPO="$repo"
+export CAUTO_BENCH_PROMPT="$typical_prompt"
+export CAUTO_BENCH_LARGE_PROMPT_FILE="$large_prompt_file"
+help_command='"$CAUTO_BENCH_BINARY" --help >/dev/null'
+explain_command='"$CAUTO_BENCH_BINARY" --repo "$CAUTO_BENCH_REPO" explain "$CAUTO_BENCH_PROMPT" >/dev/null'
+dry_command='"$CAUTO_BENCH_BINARY" --repo "$CAUTO_BENCH_REPO" --dry-run "$CAUTO_BENCH_PROMPT" >/dev/null'
+large_command='"$CAUTO_BENCH_BINARY" --repo "$CAUTO_BENCH_REPO" --dry-run --prompt-file "$CAUTO_BENCH_LARGE_PROMPT_FILE" >/dev/null'
+catalog_command='"$CAUTO_BENCH_BINARY" --repo "$CAUTO_BENCH_REPO" --json models >/dev/null'
+route_exec_command='"$CAUTO_BENCH_BINARY" --repo "$CAUTO_BENCH_REPO" --dry-run --print-command "$CAUTO_BENCH_PROMPT" >/dev/null'
 
 echo "Final Codex runtime is excluded from every timed route."
 if command -v hyperfine >/dev/null 2>&1; then
@@ -69,7 +84,18 @@ else
   measure route-to-command 50 --repo "$repo" --dry-run --print-command "$typical_prompt"
 fi
 
-catalog_file="$(find "$XDG_CACHE_HOME/cauto/catalogs" -type f -name '*.json' | head -n 1)"
+catalog_file=""
+for candidate in "$catalog_dir"/*.json; do
+  if [[ -f "$candidate" ]]; then
+    catalog_file="$candidate"
+    break
+  fi
+done
+if [[ -z "$catalog_file" ]]; then
+  echo "cauto benchmark: no catalog cache was created under $catalog_dir" >&2
+  exit 1
+fi
+
 "$binary" bench-core --policy "$policy" --catalog "$catalog_file" --iterations 1000
 "$binary" --repo "$repo" bench-agent-route --iterations 1000
 "$binary" bench-score --iterations 10000000
